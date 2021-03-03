@@ -186,12 +186,11 @@ class HARLearner():
             #plt.show(block=False)
         return all_pseudo_label_losses
 
-    def train_meta_loop(self,num_pre_epochs,num_meta_epochs,num_pseudo_label_epochs,prob_thresh):
+    def train_meta_loop(self,num_pre_epochs,num_meta_epochs,num_pseudo_label_epochs,prob_thresh,selected_acts):
         writer = SummaryWriter()
         self.rec_train(num_pre_epochs)
         old_pred_labels = -np.ones(self.dset.y.shape)
         print('modelling')
-        all_all_pseudo_label_losses = []
         for epoch_num in range(num_meta_epochs):
             print('Meta Epoch:', epoch_num)
             if ARGS.test:
@@ -199,7 +198,7 @@ class HARLearner():
             else:
                 latents = self.get_latents()
                 print('umapping')
-                umapped_latents = umap.UMAP(min_dist=0,n_neighbors=30,n_components=2,random_state=42).fit_transform(latents.squeeze())
+                umapped_latents = umap.UMAP(min_dist=0,n_neighbors=60,n_components=2,random_state=42).fit_transform(latents.squeeze())
             model = hmm.GaussianHMM(self.num_classes,'full')
             model.params = 'mc'
             model.init_params = 'mc'
@@ -227,13 +226,20 @@ class HARLearner():
                 self.pseudo_label_train(mask=mask,pseudo_labels=new_pred_labels,num_epochs=num_pseudo_label_epochs,writer=writer)
             print('translating labelling')
             print('pseudo label training')
-            counts = {item:sum(new_pred_labels==item) for item in set(new_pred_labels)}
-            mask_counts = {item:sum(new_pred_labels[mask]==item) for item in set(new_pred_labels[mask])}
+            counts = {selected_acts[item]:sum(new_pred_labels==item) for item in set(new_pred_labels)}
+            mask_counts = {selected_acts[item]:sum(new_pred_labels[mask]==item) for item in set(new_pred_labels[mask])}
             print('Counts:',counts)
             print('Masked Counts:',mask_counts)
             print('Latent accuracy:', utils.accuracy(new_pred_labels,self.dset.y))
             print('Masked Latent accuracy:', utils.accuracy(new_pred_labels[mask],self.dset.y[mask]),mask.sum())
             rand_idxs = np.array([15,1777,1982,9834,11243,25,7777,5982,5834,41203,250,7717,5912,5134,41843])
+            np_gt_labels = self.dset.y.detach().cpu().numpy().astype(int)
+            for action_num in np.unique(np_gt_labels):
+                action_preds = new_pred_labels[np_gt_labels==action_num]
+                action_name = selected_acts[action_num]
+                num_correct = (action_preds==action_num).sum()
+                total_num = len(action_preds)
+                print(f"{action_name}: {num_correct/total_num} ({num_correct}/{total_num})")
             print('GT:',self.dset.y[rand_idxs].int().tolist())
             print('Old:',old_pred_labels[rand_idxs])
             print('New:',new_pred_labels[rand_idxs])
@@ -297,7 +303,7 @@ def train(args):
     # Make dataset
     #subj_ids = [101,102,103,104,105,106,107,108,109]
     subj_ids = [101]
-    acts = {1:'lying',2:'sitting',3:'standing',4:'walking',5:'running',6:'cycling',7:'Nordic walking',9:'watching TV',10:'computer work',11:'car driving',12:'ascending stairs',13:'descending stairs',16:'vacuum cleaning',17:'ironing',18:'folding laundry',19:'house cleaning',20:'playing soccer',24:'rope jumping'}
+    action_name_dict = {1:'lying',2:'sitting',3:'standing',4:'walking',5:'running',6:'cycling',7:'Nordic walking',9:'watching TV',10:'computer work',11:'car driving',12:'ascending stairs',13:'descending stairs',16:'vacuum cleaning',17:'ironing',18:'folding laundry',19:'house cleaning',20:'playing soccer',24:'rope jumping'}
     x = np.concatenate([np.load(f'PAMAP2_Dataset/np_data/subject{subj_id}.npy') for subj_id in subj_ids])
     y = np.concatenate([np.load(f'PAMAP2_Dataset/np_data/subject{subj_id}_labels.npy') for subj_id in subj_ids])
     x = x[y!=0]
@@ -305,12 +311,13 @@ def train(args):
     xnans = np.isnan(x).any(axis=1)
     x = x[~xnans]
     y = y[~xnans]
-    selected_acts = [acts[act_id] for act_id in set(y)]
+    selected_ids = set(y)
+    selected_acts = [action_name_dict[act_id] for act_id in selected_ids]
     num_windows = (len(x) - args.window_size)//args.step_size + 1
     mode_labels = np.concatenate([stats.mode(y[w*args.step_size:w*args.step_size + args.window_size]).mode for w in range(num_windows)])
     mode_labels = utils.compress_labels(mode_labels)
     assert len(selected_acts) == len(set(mode_labels))
-    pprint(selected_acts)
+    pprint(list(zip(selected_ids,selected_acts)))
     num_labels = len(set(mode_labels))
     x = torch.tensor(x,device='cuda').float()
     y = torch.tensor(mode_labels,device='cuda').float()
@@ -351,7 +358,7 @@ def train(args):
 
     har = HARLearner(enc=enc,dec=dec,mlp=mlp,dset=dset,device='cuda',batch_size=args.batch_size,num_classes=num_labels)
 
-    har.train_meta_loop(num_pre_epochs=args.num_pre_epochs, num_meta_epochs=args.num_meta_epochs, num_pseudo_label_epochs=args.num_pseudo_label_epochs, prob_thresh=args.prob_thresh)
+    har.train_meta_loop(num_pre_epochs=args.num_pre_epochs, num_meta_epochs=args.num_meta_epochs, num_pseudo_label_epochs=args.num_pseudo_label_epochs, prob_thresh=args.prob_thresh,selected_acts=selected_acts)
 
 if __name__ == "__main__":
 
