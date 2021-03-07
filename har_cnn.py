@@ -1,4 +1,7 @@
 from pprint import pprint
+import sys
+import os
+import pickle
 import matplotlib.pyplot as plt
 import copy
 import argparse
@@ -109,6 +112,8 @@ class HARLearner():
         self.enc.train()
         if isinstance(pseudo_labels,np.ndarray):
             pseudo_labels = torch.tensor(pseudo_labels)
+        if isinstance(pseudo_labels2,np.ndarray):
+            pseudo_labels2 = torch.tensor(pseudo_labels2)
         pseudo_label_dset = StepDataset(self.dset.x,pseudo_labels,device='cuda',window_size=self.dset.window_size,step_size=self.dset.step_size, pl_training=False)
         pseudo_label_dl = data.DataLoader(pseudo_label_dset,batch_sampler=data.BatchSampler(data.RandomSampler(pseudo_label_dset),self.batch_size,drop_last=True),pin_memory=False)
         if pseudo_labels2=='none':
@@ -117,6 +122,7 @@ class HARLearner():
         else:
             pseudo_label_dset2 = StepDataset(self.dset.x,torch.tensor(pseudo_labels2),device='cuda',window_size=self.dset.window_size,step_size=self.dset.step_size, pl_training=False)
             pseudo_label_dl2 = data.DataLoader(pseudo_label_dset2,batch_sampler=data.BatchSampler(data.RandomSampler(pseudo_label_dset2),self.batch_size,drop_last=True),pin_memory=False)
+            assert (pseudo_labels==pseudo_labels2).all()
         to_iter = zip(pseudo_label_dl,pseudo_label_dl2)
         all_pseudo_label_losses = []
         start_indexing_at = position_in_meta_loop*num_epochs*len(pseudo_label_dl)
@@ -186,36 +192,44 @@ class HARLearner():
             #plt.show(block=False)
         return all_pseudo_label_losses
 
-    def train_meta_loop(self,num_pre_epochs,num_meta_epochs,num_pseudo_label_epochs,prob_thresh,selected_acts):
+    def train_meta_loop(self,num_pre_epochs,num_meta_epochs,num_pseudo_label_epochs,prob_thresh,selected_acts,exp_dir):
         writer = SummaryWriter()
         self.rec_train(num_pre_epochs)
         old_pred_labels = -np.ones(self.dset.y.shape)
+        plt.switch_backend('agg')
         print('modelling')
         for epoch_num in range(num_meta_epochs):
             print('Meta Epoch:', epoch_num)
             if ARGS.test:
-                umapped_latents = np.load('test_umapped_latents.npy')
+                num_tiles = len(self.dset.y)//self.num_classes
+                new_pred_labels = np.tile(np.arange(self.num_classes),num_tiles).astype(np.long)
+                additional = len(self.dset.y) - (num_tiles*self.num_classes)
+                if additional > 0:
+                    new_pred_labels = np.concatenate((new_pred_labels,np.ones(additional)))
+                new_pred_labels = new_pred_labels.astype(np.long)
+                mask = torch.ones(len(self.dset.y)).bool()
+                old_pred_labels = new_pred_labels
             else:
                 latents = self.get_latents()
                 print('umapping')
                 umapped_latents = umap.UMAP(min_dist=0,n_neighbors=60,n_components=2,random_state=42).fit_transform(latents.squeeze())
-            model = hmm.GaussianHMM(self.num_classes,'full')
-            model.params = 'mc'
-            model.init_params = 'mc'
-            model.startprob_ = np.ones(self.num_classes)/self.num_classes
-            num_action_blocks = len([item for idx,item in enumerate(self.dset.y) if self.dset.y[idx-1] != item])
-            prob_new_action = num_action_blocks/len(self.dset)
-            model.transmat_ = (np.eye(self.num_classes) * (1-prob_new_action)) + (np.ones((self.num_classes,self.num_classes))*prob_new_action/self.num_classes)
-            model.fit(umapped_latents)
-            new_pred_labels = model.predict(umapped_latents)
-            new_pred_probs = model.predict_proba(umapped_latents)
-            mask = new_pred_probs.max(axis=1) >= prob_thresh
-            fig = plt.figure()
-            utils.scatter_clusters(umapped_latents,self.dset.y,show=False)
-            writer.add_figure(f'umapped_latents/{epoch_num}',fig)
-            print('Prob_thresh mask:',sum(mask),sum(mask)/len(new_pred_labels))
-            if ARGS.save: np.save('test_umapped_latents.npy',umapped_latents)
-            new_pred_labels = utils.translate_labellings(new_pred_labels,self.dset.y,subsample_size=30000)
+                model = hmm.GaussianHMM(self.num_classes,'full')
+                model.params = 'mc'
+                model.init_params = 'mc'
+                model.startprob_ = np.ones(self.num_classes)/self.num_classes
+                num_action_blocks = len([item for idx,item in enumerate(self.dset.y) if self.dset.y[idx-1] != item])
+                prob_new_action = num_action_blocks/len(self.dset)
+                model.transmat_ = (np.eye(self.num_classes) * (1-prob_new_action)) + (np.ones((self.num_classes,self.num_classes))*prob_new_action/self.num_classes)
+                model.fit(umapped_latents)
+                new_pred_labels = model.predict(umapped_latents)
+                new_pred_probs = model.predict_proba(umapped_latents)
+                mask = new_pred_probs.max(axis=1) >= prob_thresh
+                fig = plt.figure()
+                utils.scatter_clusters(umapped_latents,self.dset.y,show=False)
+                writer.add_figure(f'umapped_latents/{epoch_num}',fig)
+                print('Prob_thresh mask:',sum(mask),sum(mask)/len(new_pred_labels))
+                if ARGS.save: np.save('test_umapped_latents.npy',umapped_latents)
+                new_pred_labels = utils.translate_labellings(new_pred_labels,self.dset.y,subsample_size=30000)
             if epoch_num > 0:
                 mask2 = new_pred_labels==old_pred_labels
                 print('Sames:', sum(mask2), sum(mask2)/len(new_pred_labels))
@@ -244,6 +258,10 @@ class HARLearner():
             print('Old:',old_pred_labels[rand_idxs])
             print('New:',new_pred_labels[rand_idxs])
             old_pred_labels = copy.deepcopy(new_pred_labels)
+        # Save models
+        if ARGS.save:
+            with open('hmm_model.pkl', 'wb') as f: pickle.dump(model,f)
+            utils.torch_save({'enc':self.enc,'dec':self.dec,'mlp':self.mlp},exp_dir,'har_learner.pt')
 
 
 class Enc(nn.Module):
@@ -301,8 +319,8 @@ class Var_BS_MLP(nn.Module):
 
 def train(args):
     # Make dataset
-    #subj_ids = [101,102,103,104,105,106,107,108,109]
-    subj_ids = [101]
+    subj_ids = [101,102,103,104,105,106,107,108,109] if args.all_subjs else [101]
+
     action_name_dict = {1:'lying',2:'sitting',3:'standing',4:'walking',5:'running',6:'cycling',7:'Nordic walking',9:'watching TV',10:'computer work',11:'car driving',12:'ascending stairs',13:'descending stairs',16:'vacuum cleaning',17:'ironing',18:'folding laundry',19:'house cleaning',20:'playing soccer',24:'rope jumping'}
     x = np.concatenate([np.load(f'PAMAP2_Dataset/np_data/subject{subj_id}.npy') for subj_id in subj_ids])
     y = np.concatenate([np.load(f'PAMAP2_Dataset/np_data/subject{subj_id}_labels.npy') for subj_id in subj_ids])
@@ -357,27 +375,32 @@ def train(args):
     mlp.cuda()
 
     har = HARLearner(enc=enc,dec=dec,mlp=mlp,dset=dset,device='cuda',batch_size=args.batch_size,num_classes=num_labels)
+    exp_dir = os.path.join(f'experiments/{args.exp_name}')
 
-    har.train_meta_loop(num_pre_epochs=args.num_pre_epochs, num_meta_epochs=args.num_meta_epochs, num_pseudo_label_epochs=args.num_pseudo_label_epochs, prob_thresh=args.prob_thresh,selected_acts=selected_acts)
+    har.train_meta_loop(num_pre_epochs=args.num_pre_epochs, num_meta_epochs=args.num_meta_epochs, num_pseudo_label_epochs=args.num_pseudo_label_epochs, prob_thresh=args.prob_thresh,selected_acts=selected_acts,exp_dir=exp_dir)
 
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--test','-t',action='store_true')
-    parser.add_argument('--save','-s',action='store_true')
+    parser.add_argument('--all_subjs',action='store_true')
+    parser.add_argument('--batch_size',type=int,default=128)
+    parser.add_argument('--dec_lr',type=float,default=1e-3)
+    parser.add_argument('--enc_lr',type=float,default=1e-3)
+    parser.add_argument('--exp_name',type=str)
     parser.add_argument('--load_pretrained',action='store_true')
+    parser.add_argument('--mlp_lr',type=float,default=1e-3)
+    parser.add_argument('--noise',type=float,default=1.)
     parser.add_argument('--num_meta_epochs',type=int,default=30)
     parser.add_argument('--num_pre_epochs',type=int,default=5)
     parser.add_argument('--num_pseudo_label_epochs',type=int,default=5)
-    parser.add_argument('--window_size',type=int,default=512)
-    parser.add_argument('--step_size',type=int,default=5)
-    parser.add_argument('--batch_size',type=int,default=128)
     parser.add_argument('--prob_thresh',type=float,default=.95)
-    parser.add_argument('--enc_lr',type=float,default=1e-3)
-    parser.add_argument('--dec_lr',type=float,default=1e-3)
-    parser.add_argument('--mlp_lr',type=float,default=1e-3)
-    parser.add_argument('--noise',type=float,default=1.)
+    parser.add_argument('--save','-s',action='store_true')
+    parser.add_argument('--step_size',type=int,default=5)
+    parser.add_argument('--test','-t',action='store_true')
+    parser.add_argument('--window_size',type=int,default=512)
     ARGS = parser.parse_args()
 
+    if ARGS.test and ARGS.save:
+        print("Shouldn't be saving for a test run"); sys.exit()
     if ARGS.test: ARGS.num_meta_epochs = 2
     train(ARGS)
