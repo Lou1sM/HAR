@@ -257,7 +257,8 @@ class HARLearner():
                 writer.add_figure(f'umapped_latents/{epoch_num}',fig)
                 print('Prob_thresh mask:',sum(mask),sum(mask)/len(new_pred_labels))
                 if ARGS.save: np.save('test_umapped_latents.npy',umapped_latents)
-                new_pred_labels = utils.translate_labellings(new_pred_labels,self.dset.y,subsample_size=30000)
+                subsample_size = min(30000,len(self.dset.y))
+                new_pred_labels = utils.translate_labellings(new_pred_labels,self.dset.y,subsample_size=subsample_size)
             if epoch_num > 0:
                 mask2 = new_pred_labels==old_pred_labels
                 print('Sames:', sum(mask2), sum(mask2)/len(new_pred_labels))
@@ -274,7 +275,8 @@ class HARLearner():
             print('Masked Counts:',mask_counts)
             print('Latent accuracy:', utils.accuracy(new_pred_labels,self.dset.y))
             print('Masked Latent accuracy:', utils.accuracy(new_pred_labels[mask],self.dset.y[mask]),mask.sum())
-            rand_idxs = np.array([15,1777,1982,9834,11243,25,7777,5982,5834,250,7717,5912,5134])
+            rand_idxs = [15,1777,1982,9834,11243,25,7777,5982,5834,250,7717,5912,5134]
+            rand_idxs = np.array([x for x in rand_idxs if x < len(self.dset.y)])
             np_gt_labels = self.dset.y.detach().cpu().numpy().astype(int)
             for action_num in np.unique(np_gt_labels):
                 action_preds = new_pred_labels[np_gt_labels==action_num]
@@ -289,11 +291,12 @@ class HARLearner():
         # Save models
         if ARGS.save:
             utils.torch_save({'enc':self.enc,'dec':self.dec,'mlp':self.mlp},exp_dir,f'har_learner{ARGS.exp_name}.pt')
-            with open(os.path.join(exp_dir,f'HMM{ARGS.exp_name}.pkl', 'wb')) as f: pickle.dump(model,f)
+            utils.np_save(umapped_latents,exp_dir,f'umapped_latents{ARGS.exp_name}.npy')
+            utils.np_save(new_pred_labels,exp_dir,f'preds{ARGS.exp_name}.npy')
+            with open(os.path.join(exp_dir,f'HMM{ARGS.exp_name}.pkl'), 'wb') as f: pickle.dump(model,f)
 
-def train(args,subj_ids):
-    # Make dataset
 
+def make_dset(args,subj_ids):
     action_name_dict = {1:'lying',2:'sitting',3:'standing',4:'walking',5:'running',6:'cycling',7:'Nordic walking',9:'watching TV',10:'computer work',11:'car driving',12:'ascending stairs',13:'descending stairs',16:'vacuum cleaning',17:'ironing',18:'folding laundry',19:'house cleaning',20:'playing soccer',24:'rope jumping'}
     x = np.concatenate([np.load(f'PAMAP2_Dataset/np_data/subject{subj_id}.npy') for subj_id in subj_ids])
     y = np.concatenate([np.load(f'PAMAP2_Dataset/np_data/subject{subj_id}_labels.npy') for subj_id in subj_ids])
@@ -302,19 +305,23 @@ def train(args,subj_ids):
     xnans = np.isnan(x).any(axis=1)
     x = x[~xnans]
     y = y[~xnans]
-    selected_ids = set(y)
-    selected_acts = [action_name_dict[act_id] for act_id in selected_ids]
     num_windows = (len(x) - args.window_size)//args.step_size + 1
     mode_labels = np.concatenate([stats.mode(y[w*args.step_size:w*args.step_size + args.window_size]).mode for w in range(num_windows)])
-    mode_labels = utils.compress_labels(mode_labels)
+    selected_ids = set(mode_labels)
+    selected_acts = [action_name_dict[act_id] for act_id in selected_ids]
+    mode_labels, trans_dict, changed = utils.compress_labels(mode_labels)
     assert len(selected_acts) == len(set(mode_labels))
     pprint(list(zip(selected_ids,selected_acts)))
-    num_labels = len(set(mode_labels))
+    #num_labels = len(set(mode_labels))
     x = torch.tensor(x,device='cuda').float()
     y = torch.tensor(mode_labels,device='cuda').float()
     dset = StepDataset(x,y,device='cuda',window_size=args.window_size,step_size=args.step_size, pl_training=False)
+    return dset, selected_acts
 
+def train(args,subj_ids):
     # Make nets
+    dset, selected_acts = make_dset(args,subj_ids)
+    num_labels = utils.get_num_labels(dset.y)
     dec = nn.Sequential(
         nn.ConvTranspose2d(32,16,(30,8),(1,1)),#24
         nn.BatchNorm2d(16),
@@ -359,7 +366,7 @@ if __name__ == "__main__":
     parser.add_argument('--batch_size',type=int,default=128)
     parser.add_argument('--dec_lr',type=float,default=1e-3)
     parser.add_argument('--enc_lr',type=float,default=1e-3)
-    parser.add_argument('--exp_name',type=str,default="")
+    parser.add_argument('--exp_name',type=str,default="jim")
     parser.add_argument('--load_pretrained',action='store_true')
     parser.add_argument('--mlp_lr',type=float,default=1e-3)
     parser.add_argument('--noise',type=float,default=1.)
@@ -370,7 +377,7 @@ if __name__ == "__main__":
     parser.add_argument('--prob_thresh',type=float,default=.95)
     parser.add_argument('--save','-s',action='store_true')
     parser.add_argument('--step_size',type=int,default=5)
-    parser.add_argument('--subj_ids',type=int,nargs='+',default=5)
+    parser.add_argument('--subj_ids',type=int,nargs='+',default=[101])
     parser.add_argument('--test','-t',action='store_true')
     parser.add_argument('--window_size',type=int,default=512)
     ARGS = parser.parse_args()
@@ -390,5 +397,5 @@ if __name__ == "__main__":
         orig_name = ARGS.exp_name
         for subj_id in ARGS.subj_ids:
             print(f"Training and predicting on id {subj_id}")
-            ARGS.exp_name = f"{orig_name}s{subj_id}"
+            ARGS.exp_name = f"{orig_name}{subj_id}"
             train(ARGS,subj_ids=[subj_id])
