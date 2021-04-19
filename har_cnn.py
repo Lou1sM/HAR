@@ -160,13 +160,13 @@ class HARLearner():
         torch.save(self.enc.state_dict(),'enc_pretrained.pt')
         torch.save(self.dec.state_dict(),'dec_pretrained.pt')
 
-    def pseudo_label_train(self,mask,probs,pseudo_labels,num_epochs,writer,position_in_meta_loop=0):
+    def pseudo_label_train(self,mask,probs,pseudo_labels,num_epochs,writer,gt_idx,position_in_meta_loop=0):
         self.enc.train()
         if isinstance(pseudo_labels,np.ndarray):
             pseudo_labels = torch.tensor(pseudo_labels)
         probs = torch.tensor(probs,device=self.device)
         pseudo_label_dset = StepDataset(self.dset.x,pseudo_labels,device='cuda',window_size=self.dset.window_size,step_size=self.dset.step_size, pl_training=False)
-        pseudo_label_dl = data.DataLoader(pseudo_label_dset,batch_sampler=data.BatchSampler(data.RandomSampler(pseudo_label_dset),self.batch_size,drop_last=True),pin_memory=False)
+        pseudo_label_dl = data.DataLoader(pseudo_label_dset,batch_sampler=data.BatchSampler(data.RandomSampler(pseudo_label_dset),self.batch_size,drop_last=False),pin_memory=False)
         all_pseudo_label_losses = []
         start_indexing_at = position_in_meta_loop*num_epochs*len(pseudo_label_dl)
         for epoch in range(num_epochs):
@@ -180,25 +180,14 @@ class HARLearner():
             best_loss = np.inf
             assert (pseudo_label_dset.x==self.dset.x).all()
             for batch_idx, (xb,yb,idx) in enumerate(pseudo_label_dl):
-                #batch_mask = mask[idx]
                 latent = self.enc(xb)
                 latent = utils.noiseify(latent,ARGS.noise)
-                #if batch_mask.any():
                 pseudo_label_pred = self.mlp(latent[:,:,0,0])
-                #pseudo_label_loss = self.pseudo_label_lf(pseudo_label_pred[batch_mask],yb[batch_mask].long())
                 pseudo_label_loss = self.pseudo_label_lf(pseudo_label_pred,yb.long())
                 try: pseudo_label_loss = (pseudo_label_loss*probs[idx]).mean()
                 except: set_trace()
-                #else:
-                #    pseudo_label_loss = torch.tensor(0,device=self.device)
-                #if not batch_mask.all():
-                #latents_to_rec_train = latent[~batch_mask]
-                #rec_pred = self.dec(latents_to_rec_train)
                 rec_pred = self.dec(latent)
-                #rec_loss = self.rec_lf(rec_pred,xb[~batch_mask])/(~batch_mask).sum()
                 rec_loss = self.rec_lf(rec_pred,xb)
-                #else:
-                    #rec_loss = torch.tensor(0,device=self.device)
                 loss = pseudo_label_loss.mean() + rec_loss
                 if math.isnan(loss): set_trace()
                 loss.backward()
@@ -209,25 +198,18 @@ class HARLearner():
                 total_pred_list.append(pseudo_label_pred.argmax(axis=1).detach().cpu().numpy())
                 total_gt_list.append(yb.detach().cpu().numpy())
                 total_idx_list.append(idx.detach().cpu().numpy())
-                #if batch_mask.any():
-                    #epoch_pseudo_label_loss += pseudo_label_loss.item()/batch_mask.sum()
-                #writer.add_scalar('Loss/pseudo_label_loss',pseudo_label_loss.item()/batch_mask.sum(),total_idx)
                 writer.add_scalar('Loss/pseudo_label_loss',pseudo_label_loss.item(),total_idx)
-                #epoch_pseudo_label_losses.append(pseudo_label_loss.item()/batch_mask.sum())
                 epoch_pseudo_label_losses.append(pseudo_label_loss.item())
                 all_pseudo_label_losses.append(pseudo_label_loss)
-                #if not batch_mask.all():
-                #    epoch_loss += (loss.item()-epoch_loss)/(batch_idx+1)
-                #    writer.add_scalar('Loss/rec_loss',rec_loss.item()/(~batch_mask).sum(),total_idx)
-                #    epoch_rec_losses.append(rec_loss)
                 epoch_losses.append(loss)
                 if ARGS.test: break
             total_pred_array = np.concatenate(total_pred_list)
-            #total_gt_array = np.concatenate(total_gt_list)
             total_idx_array = np.concatenate(total_idx_list)
             total_gt_array = self.dset.y.detach().cpu().numpy()[total_idx_array]
             if ARGS.test: break
-            try: print(f'MLP acc: {utils.accuracy(total_pred_array,total_gt_array)}')
+            try:
+                print(f'MLP acc: {utils.accuracy(total_pred_array,total_gt_array)}')
+                print(f'MLP non-gt acc: {utils.accuracy(np.delete(total_pred_array,gt_idx),np.delete(total_gt_array,gt_idx))}')
             except: set_trace()
             if epoch_loss < best_loss:
                 best_loss = epoch_loss
@@ -241,10 +223,8 @@ class HARLearner():
     def train_meta_loop(self,num_pre_epochs,num_meta_epochs,num_pseudo_label_epochs,prob_thresh,selected_acts,frac_gt_labels,exp_dir):
         writer = SummaryWriter()
         self.rec_train(num_pre_epochs)
-        #num_gt_labels = int(len(self.dset)*frac_gt_labels)
-        #gt_idx = np.random.choice(len(self.dset),num_gt_labels,replace=False)
         gt_idx = np.arange(len(self.dset), step=int(1/frac_gt_labels))
-        assert len(gt_idx) == int(len(self.dset)*frac_gt_labels)
+        assert len(gt_idx) - len(self.dset)*frac_gt_labels < 1
         old_pred_labels = -np.ones(self.dset.y.shape)
         plt.switch_backend('agg')
         for epoch_num in range(num_meta_epochs):
@@ -274,41 +254,31 @@ class HARLearner():
                 model.fit(umapped_latents)
                 new_pred_labels = model.predict(umapped_latents)
                 new_pred_probs = model.predict_proba(umapped_latents)
-                #mask = new_pred_probs.max(axis=1) >= prob_thresh
                 mask = torch.ones(len(self.dset.y))
                 fig = plt.figure()
                 utils.scatter_clusters(umapped_latents,self.dset.y,show=False)
                 writer.add_figure(f'umapped_latents/{epoch_num}',fig)
-                #print('Prob_thresh mask:',sum(mask),sum(mask)/len(new_pred_labels))
                 if ARGS.save: np.save('test_umapped_latents.npy',umapped_latents)
                 subsample_size = min(30000,len(self.dset.y))
-                #new_pred_labels = utils.translate_labellings(new_pred_labels,self.dset.y,subsample_size=subsample_size)
                 trans_dict, leftovers = utils.get_trans_dict(new_pred_labels[gt_idx],self.dset.y[gt_idx],subsample_size='none')
                 new_pred_labels = np.array([trans_dict[l] for l in new_pred_labels])
                 new_pred_labels[gt_idx] = self.dset.y.detach().cpu().int().numpy()[gt_idx]
+                print(gt_idx.shape)
                 new_pred_labels = new_pred_labels.astype(np.int)
                 mvns = [multivariate_normal(m,c) for m,c in zip(model.means_,model.covars_)]
                 probs=[mvns[label].pdf(mean) for mean,label in zip(umapped_latents,new_pred_labels)]
                 probs = np.array(probs/max(probs))
                 probs *= new_pred_probs.max(axis=1)
-                probs[gt_idx] = 1
-            #if epoch_num > 0:
-            #    mask2 = new_pred_labels==old_pred_labels
-            #    print('Sames:', sum(mask2), sum(mask2)/len(new_pred_labels))
-            #    mask = mask*mask2
-            #    assert (new_pred_labels[mask]==old_pred_labels[mask]).all()
-            #    self.pseudo_label_train(mask=mask,pseudo_labels=new_pred_labels,num_epochs=num_pseudo_label_epochs,writer=writer,position_in_meta_loop=epoch_num)
-            #else:
-            self.pseudo_label_train(mask=mask,probs=probs,pseudo_labels=new_pred_labels,num_epochs=num_pseudo_label_epochs,writer=writer)
+                probs = np.ones(probs.shape)
+                if ARGS.prob_abl: probs[gt_idx] = 1
+            self.pseudo_label_train(mask=mask,probs=probs,pseudo_labels=new_pred_labels,num_epochs=num_pseudo_label_epochs,writer=writer,gt_idx=gt_idx)
             print('translating labelling')
             print('pseudo label training')
             counts = {selected_acts[item]:sum(new_pred_labels==item) for item in set(new_pred_labels)}
-            #mask_counts = {selected_acts[item]:sum(new_pred_labels[mask]==item) for item in set(new_pred_labels[mask])}
             mask_counts = {selected_acts[item]:sum(new_pred_labels==item) for item in set(new_pred_labels)}
             print('Counts:',counts)
             print('Masked Counts:',mask_counts)
             print('Latent accuracy:', utils.accuracy(new_pred_labels,self.dset.y))
-            #print('Masked Latent accuracy:', utils.accuracy(new_pred_labels[mask],self.dset.y[mask]),mask.sum())
             print('Masked Latent accuracy:', utils.accuracy(new_pred_labels,self.dset.y),mask.sum())
             rand_idxs = [15,1777,1982,9834,11243,25,7777,5982,5834,250,7717,5912,5134]
             rand_idxs = np.array([x for x in rand_idxs if x < len(self.dset.y)])
@@ -410,6 +380,7 @@ if __name__ == "__main__":
     parser.add_argument('--num_pre_epochs',type=int,default=5)
     parser.add_argument('--num_pseudo_label_epochs',type=int,default=5)
     parser.add_argument('--parallel',action='store_true')
+    parser.add_argument('--prob_abl',action='store_true')
     parser.add_argument('--prob_thresh',type=float,default=.95)
     parser.add_argument('--save','-s',action='store_true')
     parser.add_argument('--step_size',type=int,default=5)
