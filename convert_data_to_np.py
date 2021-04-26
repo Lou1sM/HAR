@@ -5,17 +5,20 @@ def convert(inpath,outpath):
     with open(inpath) as f:
         d = f.readlines()
         array = np.array([[float(x) for x in line.split()] for line in d])
-    timestamps = array[:,0]
-    labels = array[:,1].astype(np.int)
-    array = np.delete(array,[0,1,2,13,14,15,16,30,31,32,33,47,48,49,50],1)
-    np.save(outpath+'_timestamps',timestamps)
-    np.save(outpath+'_labels',labels)
+    #timestamps = array[:,0]
+    #labels = array[:,1].astype(np.int)
+    # Delete orientation data, which webpage says is 'invalid in this data, and timestamp and label
+    #array = np.delete(array,[0,1,2,13,14,15,16,30,31,32,33,47,48,49,50],1)
+    #np.save(outpath+'_timestamps',timestamps)
+    #np.save(outpath+'_labels',labels)
     np.save(outpath,array)
     print(f"Array for {outpath} is of shape {array.shape}")
 
 
-dat_dir = 'PAMAP2_Dataset/Protocol'
-np_dir = 'PAMAP2_Dataset/np_data'
+#dat_dir = 'PAMAP2_Dataset/Protocol'
+dat_dir = 'UCI2/RawData'
+#np_dir = 'PAMAP2_Dataset/np_data'
+np_dir = 'UCI2/np_data'
 if not os.path.isdir(np_dir):
     os.makedirs(np_dir)
 

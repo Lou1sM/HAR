@@ -16,20 +16,29 @@ import numpy as np
 from torch.utils import data
 from torch.utils.tensorboard import SummaryWriter
 import clustering.src.utils as utils
-import umap
 
 
 def display(latents_to_display):
     umapped_latents = umap.UMAP(min_dist=0,n_neighbors=30,n_components=2,random_state=42).fit_transform(latents_to_display.squeeze())
     utils.scatter_clusters(umapped_latents,labels=None,show=True)
 
+class Preprocced_Dataset(data.Dataset):
+    def __init__(self,x,y,device):
+        self.device=device
+        self.x, self.y = x,y
+        self.x, self.y = self.x.to(self.device),self.y.to(self.device)
+    def __len__(self): return len(self.x)
+    def __getitem__(self,idx):
+        batch_x = self.x[idx].unsqueeze(0)
+        batch_y = self.y[idx]
+        return batch_x, batch_y, idx
+
 class StepDataset(data.Dataset):
-    def __init__(self,x,y,device,window_size,step_size,pl_training,transforms=[]):
+    def __init__(self,x,y,device,window_size,step_size,transforms=[]):
         self.device=device
         self.x, self.y = x,y
         self.window_size = window_size
         self.step_size = step_size
-        self.pl_training = pl_training
         for transform in transforms:
             self.x = transform(self.x)
         self.x, self.y = self.x.to(self.device),self.y.to(self.device)
@@ -55,35 +64,75 @@ class StepDataset(data.Dataset):
 class Enc(nn.Module):
     def __init__(self):
         super(Enc,self).__init__()
-        self.layer1 = nn.Sequential(
-            nn.Conv2d(1,4,(50,5),(2,1)),
-            nn.BatchNorm2d(4),
-            nn.LeakyReLU(0.3),
-            nn.MaxPool2d(2)
-        )
-        self.layer2 = nn.Sequential(
-            nn.Conv2d(4,8,(40,3),(2,1)),
-            nn.LeakyReLU(0.3),
-            nn.BatchNorm2d(8),
-            nn.MaxPool2d(3),
-        )
-        self.layer3 = nn.Sequential(
-            nn.Conv2d(8,16,(5,2),(1,1)),
-            nn.LeakyReLU(0.3),
-            nn.BatchNorm2d(16),
-            nn.MaxPool2d(2),
-        )
-        self.layer4 = nn.Sequential(
-            nn.Conv2d(16,32,(3,1),(1,1)),
-            nn.LeakyReLU(0.3),
-            nn.BatchNorm2d(32),
-            nn.MaxPool2d(2),
-        )
+        if ARGS.dset == 'PAMAP':
+            self.layer1 = nn.Sequential(
+                nn.Conv2d(1,4,(50,5),(2,1)),
+                nn.BatchNorm2d(4),
+                nn.LeakyReLU(0.3),
+                nn.MaxPool2d(2)
+            )
+            self.layer2 = nn.Sequential(
+                nn.Conv2d(4,8,(40,3),(2,1)),
+                nn.LeakyReLU(0.3),
+                nn.BatchNorm2d(8),
+                nn.MaxPool2d(3),
+            )
+            self.layer3 = nn.Sequential(
+                nn.Conv2d(8,16,(5,2),(1,1)),
+                nn.LeakyReLU(0.3),
+                nn.BatchNorm2d(16),
+                nn.MaxPool2d(2),
+            )
+            self.layer4 = nn.Sequential(
+                nn.Conv2d(16,32,(3,1),(1,1)),
+                nn.LeakyReLU(0.3),
+                nn.BatchNorm2d(32),
+                nn.MaxPool2d(2),
+            )
+        else:
+            self.layer1 = nn.Sequential(
+                nn.Conv2d(1,4,(10,20),(2,2)),
+                nn.BatchNorm2d(4),
+                nn.LeakyReLU(0.3),
+                nn.MaxPool2d(2)
+            )
+            self.layer2 = nn.Sequential(
+                nn.Conv2d(4,8,(10,15),(2,2)),
+                nn.LeakyReLU(0.3),
+                nn.BatchNorm2d(8),
+                nn.MaxPool2d(3),
+            )
+            self.layer3 = nn.Sequential(
+                nn.Conv2d(8,16,(4,5),(1,1)),
+                nn.LeakyReLU(0.3),
+                nn.BatchNorm2d(16),
+                nn.MaxPool2d(2),
+            )
+            self.layer4 = nn.Sequential(
+                nn.Conv2d(16,32,(3,3),(1,1)),
+                nn.LeakyReLU(0.3),
+                nn.BatchNorm2d(32),
+                nn.MaxPool2d(2),
+            )
+            self.layer5 = nn.Sequential(
+                nn.Conv2d(32,64,(3,3),(1,1)),
+                nn.LeakyReLU(0.3),
+                nn.BatchNorm2d(64),
+                nn.MaxPool2d(2),
+            )
+
     def forward(self,x):
         out = self.layer1(x)
+        print(out.shape)
         out = self.layer2(out)
+        print(out.shape)
         out = self.layer3(out)
+        print(out.shape)
         out = self.layer4(out)
+        print(out.shape)
+        if ARGS.dset == 'UCI':
+            out = self.layer5(out)
+        print(out.shape)
         return out
 
 class Var_BS_MLP(nn.Module):
@@ -140,6 +189,7 @@ class HARLearner():
             epoch_loss = 0
             best_loss = np.inf
             for idx, (xb,yb,tb) in enumerate(self.dl):
+                set_trace()
                 latent = self.enc(xb)
                 latent = utils.noiseify(latent,ARGS.noise)
                 pred = self.dec(latent)
@@ -228,6 +278,8 @@ class HARLearner():
         except:set_trace()
         old_pred_labels = -np.ones(self.dset.y.shape)
         plt.switch_backend('agg')
+        alpha = .5
+        prev_weighted_probs = np.zeros((len(self.dset),self.num_classes))
         for epoch_num in range(num_meta_epochs):
             print('Meta Epoch:', epoch_num)
             if ARGS.test:
@@ -238,12 +290,14 @@ class HARLearner():
                     new_pred_labels = np.concatenate((new_pred_labels,np.ones(additional)))
                 new_pred_labels = new_pred_labels.astype(np.long)
                 mask = torch.ones(len(self.dset.y)).bool()
+                weighted_probs = torch.ones(len(self.dset.y)).bool()
                 probs = torch.ones(len(self.dset.y)).bool()
                 old_pred_labels = new_pred_labels
             else:
                 latents = self.get_latents()
                 print('umapping')
-                umapped_latents = umap.UMAP(min_dist=0,n_neighbors=60,n_components=2,random_state=42).fit_transform(latents.squeeze())
+                #umapped_latents = umap.UMAP(min_dist=0,n_neighbors=60,n_components=2,random_state=42).fit_transform(latents.squeeze())
+                umapped_latents = latents
                 print('modelling')
                 model = hmm.GaussianHMM(self.num_classes,'full')
                 model.params = 'mc'
@@ -260,15 +314,16 @@ class HARLearner():
                 utils.scatter_clusters(umapped_latents,self.dset.y,show=False)
                 writer.add_figure(f'umapped_latents/{epoch_num}',fig)
                 if ARGS.save: np.save('test_umapped_latents.npy',umapped_latents)
-                subsample_size = min(30000,len(self.dset.y))
+                subsample_size = min(30000,int(len(self.dset.y)*frac_gt_labels))
                 trans_dict, leftovers = utils.get_trans_dict(new_pred_labels[gt_idx],self.dset.y[gt_idx],subsample_size=subsample_size)
                 new_pred_labels = np.array([trans_dict[l] for l in new_pred_labels])
                 new_pred_labels[gt_idx] = self.dset.y.detach().cpu().int().numpy()[gt_idx]
-                print(gt_idx.shape)
                 new_pred_labels = new_pred_labels.astype(np.int)
                 mvns = [multivariate_normal(m,c) for m,c in zip(model.means_,model.covars_)]
-                probs=[mvns[label].pdf(mean) for mean,label in zip(umapped_latents,new_pred_labels)]
-                probs = np.array(probs/max(probs))
+                probs=np.array([mvns[label].pdf(mean) for mean,label in zip(umapped_latents,new_pred_labels)])
+                weighted_probs = probs if epoch_num==0 else alpha*probs + (1-alpha)*prev_weighted_probs
+                # Scale so max prob is 1 for each dpoint
+                weighted_probs = weighted_probs/max(weighted_probs)
                 probs *= new_pred_probs.max(axis=1)
                 if ARGS.prob_abl: probs = np.ones(probs.shape)
                 probs[gt_idx] = 1
@@ -277,25 +332,17 @@ class HARLearner():
             print('pseudo label training')
             counts = {selected_acts[item]:sum(new_pred_labels==item) for item in set(new_pred_labels)}
             mlp_counts = {selected_acts[item]:sum(mlp_preds==item) for item in set(mlp_preds)}
-            print('Counts:',counts)
-            print('MLP Counts:',mlp_counts)
-            print('Latent accuracy:', utils.accuracy(new_pred_labels,self.dset.y))
-            print('Masked Latent accuracy:', utils.accuracy(new_pred_labels,self.dset.y),mask.sum())
-            rand_idxs = [15,1777,1982,9834,11243,25,7777,5982,5834,250,7717,5912,5134]
-            rand_idxs = np.array([x for x in rand_idxs if x < len(self.dset.y)])
-            np_gt_labels = self.dset.y.detach().cpu().numpy().astype(int)
-            for action_num in np.unique(np_gt_labels):
-                try:
-                    action_preds = mlp_preds[np_gt_labels==action_num]
-                    action_name = selected_acts[action_num]
-                    num_correct = (action_preds==action_num).sum()
-                    total_num = len(action_preds)
-                except Exception as e: print(e,action_num,selected_acts[action_num])
-                print(f"{action_name}: {round(num_correct/total_num,3)} ({num_correct}/{total_num})")
-            print('GT:',self.dset.y[rand_idxs].int().tolist())
-            print('Old:',mlp_preds[rand_idxs])
-            print('New:',mlp_preds[rand_idxs])
-            old_pred_labels = copy.deepcopy(new_pred_labels)
+            if ARGS.show_counts:
+                print('Counts:',counts)
+                print('MLP Counts:',mlp_counts)
+            acc = utils.accuracy(new_pred_labels,self.dset.y)
+            summary_file_path = os.path.join(exp_dir,'summary.txt')
+            utils.check_dir(exp_dir)
+            with open(summary_file_path,'w') as f:
+                f.write(str(ARGS))
+                f.write(f'Acc: {acc}')
+                print('Latent accuracy:', acc)
+            prev_weighted_probs = weighted_probs
         # Save models
         if ARGS.save:
             utils.torch_save({'enc':self.enc,'dec':self.dec,'mlp':self.mlp},exp_dir,f'har_learner{ARGS.exp_name}.pt')
@@ -304,7 +351,16 @@ class HARLearner():
             with open(os.path.join(exp_dir,f'HMM{ARGS.exp_name}.pkl'), 'wb') as f: pickle.dump(model,f)
 
 
-def make_dset(args,subj_ids):
+def make_uci_dset(args):
+    selected_acts = {1:'walking',2:'walking upstairs',3:'walking downstairs',4:'sitting',5:'standing',6:'lying',7:'stand_to_sit',9:'sit_to_stand',10:'sit_to_lit',11:'lie_to_sit',12:'stand_to_lie',13:'lie_to_stand'}
+    x = np.load('UCI2/X_train.npy')
+    y = np.load('UCI2/y_train.npy')
+    x = torch.tensor(x,device='cuda').float()
+    y = torch.tensor(y,device='cuda').float()
+    dset = StepDataset(x,y,device='cuda',window_size=args.window_size,step_size=args.step_size)
+    return dset, selected_acts
+
+def make_pamap_dset(args,subj_ids):
     action_name_dict = {1:'lying',2:'sitting',3:'standing',4:'walking',5:'running',6:'cycling',7:'Nordic walking',9:'watching TV',10:'computer work',11:'car driving',12:'ascending stairs',13:'descending stairs',16:'vacuum cleaning',17:'ironing',18:'folding laundry',19:'house cleaning',20:'playing soccer',24:'rope jumping'}
     x = np.concatenate([np.load(f'PAMAP2_Dataset/np_data/subject{subj_id}.npy') for subj_id in subj_ids])
     y = np.concatenate([np.load(f'PAMAP2_Dataset/np_data/subject{subj_id}_labels.npy') for subj_id in subj_ids])
@@ -323,12 +379,13 @@ def make_dset(args,subj_ids):
     #num_labels = len(set(mode_labels))
     x = torch.tensor(x,device='cuda').float()
     y = torch.tensor(mode_labels,device='cuda').float()
-    dset = StepDataset(x,y,device='cuda',window_size=args.window_size,step_size=args.step_size, pl_training=False)
+    dset = StepDataset(x,y,device='cuda',window_size=args.window_size,step_size=args.step_size)
     return dset, selected_acts
 
 def train(args,subj_ids):
     # Make nets
-    dset, selected_acts = make_dset(args,subj_ids)
+    os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
+    dset, selected_acts = make_pamap_dset(args,subj_ids) if args.dset=='PAMAP' else make_uci_dset(args)
     num_labels = utils.get_num_labels(dset.y)
     dec = nn.Sequential(
         nn.ConvTranspose2d(32,16,(30,8),(1,1)),#24
@@ -373,9 +430,11 @@ if __name__ == "__main__":
     parser.add_argument('--all_subjs',action='store_true')
     parser.add_argument('--batch_size',type=int,default=128)
     parser.add_argument('--dec_lr',type=float,default=1e-3)
+    parser.add_argument('--dset',type=str)
     parser.add_argument('--enc_lr',type=float,default=1e-3)
     parser.add_argument('--exp_name',type=str,default="jim")
     parser.add_argument('--frac_gt_labels',type=float,default=0.1)
+    parser.add_argument('--gpu',type=str,default='0')
     parser.add_argument('--load_pretrained',action='store_true')
     parser.add_argument('--mlp_lr',type=float,default=1e-3)
     parser.add_argument('--noise',type=float,default=1.)
@@ -388,13 +447,17 @@ if __name__ == "__main__":
     parser.add_argument('--save','-s',action='store_true')
     parser.add_argument('--step_size',type=int,default=5)
     parser.add_argument('--subj_ids',type=int,nargs='+',default=[101])
+    parser.add_argument('--show_counts',action='store_true')
     parser.add_argument('--test','-t',action='store_true')
     parser.add_argument('--window_size',type=int,default=512)
     ARGS = parser.parse_args()
+    e = Enc().cuda()
+    print(e(torch.ones((128,1,512,561),device='cuda')).shape)
 
     if ARGS.test and ARGS.save:
         print("Shouldn't be saving for a test run"); sys.exit()
     if ARGS.test: ARGS.num_meta_epochs = 2
+    else: import umap
     all_possible_ids = [101,102,103,104,105,106,107,108,109]
     bad_ids = [x for x in ARGS.subj_ids if x not in all_possible_ids]
     if len(bad_ids) > 0:
