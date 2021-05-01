@@ -29,7 +29,7 @@ class Preprocced_Dataset(data.Dataset):
         self.x, self.y = self.x.to(self.device),self.y.to(self.device)
     def __len__(self): return len(self.x)
     def __getitem__(self,idx):
-        batch_x = self.x[idx].unsqueeze(0)
+        batch_x = self.x[idx]
         batch_y = self.y[idx]
         return batch_x, batch_y, idx
 
@@ -45,12 +45,8 @@ class StepDataset(data.Dataset):
     def __len__(self): return (len(self.x)-self.window_size)//self.step_size + 1
     def __getitem__(self,idx):
         batch_x = self.x[idx*self.step_size:(idx*self.step_size) + self.window_size].unsqueeze(0)
-        #if self.pl_training:
         batch_y = self.y[idx]
         return batch_x, batch_y, idx
-        #else:
-            #batch_y = self.y[idx*self.step_size:(idx*self.step_size) + self.window_size]
-            #return batch_x, batch_y, idx
 
     def temporal_consistency_loss(self,sequence):
         total_loss = 0
@@ -91,49 +87,59 @@ class Enc(nn.Module):
             )
         else:
             self.layer1 = nn.Sequential(
-                nn.Conv2d(1,4,(10,20),(2,2)),
+                nn.Conv2d(1,4,(50,1),(2,1)),
                 nn.BatchNorm2d(4),
                 nn.LeakyReLU(0.3),
-                nn.MaxPool2d(2)
+                nn.MaxPool2d((2,1))
             )
             self.layer2 = nn.Sequential(
-                nn.Conv2d(4,8,(10,15),(2,2)),
+                nn.Conv2d(4,8,(40,1),(2,1)),
                 nn.LeakyReLU(0.3),
                 nn.BatchNorm2d(8),
-                nn.MaxPool2d(3),
+                nn.MaxPool2d((3,1)),
             )
             self.layer3 = nn.Sequential(
-                nn.Conv2d(8,16,(4,5),(1,1)),
+                nn.Conv2d(8,16,(5,3),(1,3)),
                 nn.LeakyReLU(0.3),
                 nn.BatchNorm2d(16),
-                nn.MaxPool2d(2),
+                nn.MaxPool2d((2,1)),
             )
             self.layer4 = nn.Sequential(
-                nn.Conv2d(16,32,(3,3),(1,1)),
+                nn.Conv2d(16,32,(4,2)),
                 nn.LeakyReLU(0.3),
                 nn.BatchNorm2d(32),
-                nn.MaxPool2d(2),
-            )
-            self.layer5 = nn.Sequential(
-                nn.Conv2d(32,64,(3,3),(1,1)),
-                nn.LeakyReLU(0.3),
-                nn.BatchNorm2d(64),
-                nn.MaxPool2d(2),
             )
 
     def forward(self,x):
         out = self.layer1(x)
-        print(out.shape)
         out = self.layer2(out)
-        print(out.shape)
         out = self.layer3(out)
-        print(out.shape)
         out = self.layer4(out)
-        print(out.shape)
-        if ARGS.dset == 'UCI':
-            out = self.layer5(out)
-        print(out.shape)
         return out
+
+class Dense_Net(nn.Module):
+    def __init__(self,*sizes):
+        super(Dense_Net,self).__init__()
+        self.net= nn.Sequential(
+            *[nn.Sequential(*[nn.Linear(sizes[i-1],sizes[i]),nn.BatchNorm1d(sizes[i]),nn.LeakyReLU(sizes[i])]) for i in range(1,len(sizes)-1)], nn.Linear(sizes[-2],sizes[-1]))
+        #self.fc1 = nn.Linear(input_size,hidden_size1)
+        #self.bn1 = nn.BatchNorm1d(hidden_size1)
+        #self.act1 = nn.LeakyReLU(0.3)
+        #self.fc2 = nn.Linear(hidden_size1,hidden_size2)
+        #self.bn2 = nn.BatchNorm1d(hidden_size2)
+        #self.act2 = nn.LeakyReLU(0.3)
+        #self.fc3 = nn.Linear(hidden_size2,output_size)
+
+    def forward(self,x):
+        x = self.net(x)
+        #x = self.fc1(x)
+        #x = self.bn1(x)
+        #x = self.act1(x)
+        #x = self.fc2(x)
+        #x = self.bn2(x)
+        #x = self.act2(x)
+        #x = self.fc3(x)
+        return x
 
 class Var_BS_MLP(nn.Module):
     def __init__(self,input_size,hidden_size,output_size):
@@ -189,7 +195,6 @@ class HARLearner():
             epoch_loss = 0
             best_loss = np.inf
             for idx, (xb,yb,tb) in enumerate(self.dl):
-                set_trace()
                 latent = self.enc(xb)
                 latent = utils.noiseify(latent,ARGS.noise)
                 pred = self.dec(latent)
@@ -215,7 +220,10 @@ class HARLearner():
         if isinstance(pseudo_labels,np.ndarray):
             pseudo_labels = torch.tensor(pseudo_labels)
         probs = torch.tensor(probs,device=self.device)
-        pseudo_label_dset = StepDataset(self.dset.x,pseudo_labels,device='cuda',window_size=self.dset.window_size,step_size=self.dset.step_size, pl_training=False)
+        if isinstance(self.dset,Preprocced_Dataset):
+            pseudo_label_dset = Preprocced_Dataset(self.dset.x,pseudo_labels,device='cuda')
+        else:
+            pseudo_label_dset = StepDataset(self.dset.x,pseudo_labels,device='cuda',window_size=self.dset.window_size,step_size=self.dset.step_size)
         pseudo_label_dl = data.DataLoader(pseudo_label_dset,batch_sampler=data.BatchSampler(data.RandomSampler(pseudo_label_dset),self.batch_size,drop_last=False),pin_memory=False)
         all_pseudo_label_losses = []
         start_indexing_at = position_in_meta_loop*num_epochs*len(pseudo_label_dl)
@@ -232,7 +240,7 @@ class HARLearner():
             for batch_idx, (xb,yb,idx) in enumerate(pseudo_label_dl):
                 latent = self.enc(xb)
                 latent = utils.noiseify(latent,ARGS.noise)
-                pseudo_label_pred = self.mlp(latent[:,:,0,0])
+                pseudo_label_pred = self.mlp(latent) if latent.ndim == 2 else self.mlp(latent[:,:,0,0])
                 pseudo_label_loss = self.pseudo_label_lf(pseudo_label_pred,yb.long())
                 try: pseudo_label_loss = (pseudo_label_loss*probs[idx]).mean()
                 except: set_trace()
@@ -258,7 +266,7 @@ class HARLearner():
             total_gt_array = self.dset.y.detach().cpu().numpy()[total_idx_array]
             if ARGS.test: break
             try:
-                print(f'MLP acc: {utils.accuracy(total_pred_array,total_gt_array)}')
+                #print(f'MLP acc: {utils.accuracy(total_pred_array,total_gt_array)}')
                 print(f'MLP non-gt acc: {utils.accuracy(np.delete(total_pred_array,gt_idx),np.delete(total_gt_array,gt_idx))}')
             except: set_trace()
             if epoch_loss < best_loss:
@@ -296,8 +304,7 @@ class HARLearner():
             else:
                 latents = self.get_latents()
                 print('umapping')
-                #umapped_latents = umap.UMAP(min_dist=0,n_neighbors=60,n_components=2,random_state=42).fit_transform(latents.squeeze())
-                umapped_latents = latents
+                umapped_latents = umap.UMAP(min_dist=0,n_neighbors=60,n_components=2,random_state=42).fit_transform(latents.squeeze())
                 print('modelling')
                 model = hmm.GaussianHMM(self.num_classes,'full')
                 model.params = 'mc'
@@ -315,6 +322,7 @@ class HARLearner():
                 writer.add_figure(f'umapped_latents/{epoch_num}',fig)
                 if ARGS.save: np.save('test_umapped_latents.npy',umapped_latents)
                 subsample_size = min(30000,int(len(self.dset.y)*frac_gt_labels))
+                print('translating labelling')
                 trans_dict, leftovers = utils.get_trans_dict(new_pred_labels[gt_idx],self.dset.y[gt_idx],subsample_size=subsample_size)
                 new_pred_labels = np.array([trans_dict[l] for l in new_pred_labels])
                 new_pred_labels[gt_idx] = self.dset.y.detach().cpu().int().numpy()[gt_idx]
@@ -324,11 +332,10 @@ class HARLearner():
                 weighted_probs = probs if epoch_num==0 else alpha*probs + (1-alpha)*prev_weighted_probs
                 # Scale so max prob is 1 for each dpoint
                 weighted_probs = weighted_probs/max(weighted_probs)
-                probs *= new_pred_probs.max(axis=1)
+                weighted_probs *= new_pred_probs.max(axis=1)
                 if ARGS.prob_abl: probs = np.ones(probs.shape)
-                probs[gt_idx] = 1
-            mlp_preds = self.pseudo_label_train(mask=mask,probs=probs,pseudo_labels=new_pred_labels,num_epochs=num_pseudo_label_epochs,writer=writer,gt_idx=gt_idx)
-            print('translating labelling')
+                weighted_probs[gt_idx] = 1
+            mlp_preds = self.pseudo_label_train(mask=mask,probs=weighted_probs,pseudo_labels=new_pred_labels,num_epochs=num_pseudo_label_epochs,writer=writer,gt_idx=gt_idx)
             print('pseudo label training')
             counts = {selected_acts[item]:sum(new_pred_labels==item) for item in set(new_pred_labels)}
             mlp_counts = {selected_acts[item]:sum(mlp_preds==item) for item in set(mlp_preds)}
@@ -351,13 +358,36 @@ class HARLearner():
             with open(os.path.join(exp_dir,f'HMM{ARGS.exp_name}.pkl'), 'wb') as f: pickle.dump(model,f)
 
 
-def make_uci_dset(args):
-    selected_acts = {1:'walking',2:'walking upstairs',3:'walking downstairs',4:'sitting',5:'standing',6:'lying',7:'stand_to_sit',9:'sit_to_stand',10:'sit_to_lit',11:'lie_to_sit',12:'stand_to_lie',13:'lie_to_stand'}
-    x = np.load('UCI2/X_train.npy')
-    y = np.load('UCI2/y_train.npy')
-    x = torch.tensor(x,device='cuda').float()
-    y = torch.tensor(y,device='cuda').float()
-    dset = StepDataset(x,y,device='cuda',window_size=args.window_size,step_size=args.step_size)
+def make_uci_dset(args,subj_ids):
+    action_name_dict = {1:'walking',2:'walking upstairs',3:'walking downstairs',4:'sitting',5:'standing',6:'lying',7:'stand_to_sit',9:'sit_to_stand',10:'sit_to_lit',11:'lie_to_sit',12:'stand_to_lie',13:'lie_to_stand'}
+    if args.dset == 'UCI-pre':
+        selected_acts = list(action_name_dict.values())
+        x = np.load('UCI2/X_train.npy')
+        y = np.load('UCI2/y_train.npy')
+        x = x[y!=-1]
+        y = y[y!=-1]
+        x = torch.tensor(x,device='cuda').float()
+        y = torch.tensor(y,device='cuda').float() - 1 #To begin at 0 rather than 1
+        dset = Preprocced_Dataset(x,y,device='cuda')
+    elif args.dset == 'UCI-raw':
+        x = np.concatenate([np.load(f'UCI2/np_data/user{subj_id}.npy') for subj_id in subj_ids])
+        y = np.concatenate([np.load(f'UCI2/np_data/user{subj_id}_labels.npy') for subj_id in subj_ids])
+        xnans = np.isnan(x).any(axis=1)
+        x = x[~xnans]
+        y = y[~xnans]
+        x = x[y<7] # Labels still begin at 1 at this point as
+        y = y[y<7] # haven't been compressed, so select 1,..,6
+        x = x[y!=-1]
+        y = y[y!=-1]
+        num_windows = (len(x) - args.window_size)//args.step_size + 1
+        mode_labels = np.concatenate([stats.mode(y[w*args.step_size:w*args.step_size + args.window_size]).mode for w in range(num_windows)])
+        selected_ids = set(mode_labels)
+        selected_acts = [action_name_dict[act_id] for act_id in selected_ids]
+        mode_labels, trans_dict, changed = utils.compress_labels(mode_labels)
+        assert len(selected_acts) == len(set(mode_labels))
+        x = torch.tensor(x,device='cuda').float()
+        y = torch.tensor(mode_labels,device='cuda').float()
+        dset = StepDataset(x,y,device='cuda',window_size=args.window_size,step_size=args.step_size)
     return dset, selected_acts
 
 def make_pamap_dset(args,subj_ids):
@@ -375,8 +405,6 @@ def make_pamap_dset(args,subj_ids):
     selected_acts = [action_name_dict[act_id] for act_id in selected_ids]
     mode_labels, trans_dict, changed = utils.compress_labels(mode_labels)
     assert len(selected_acts) == len(set(mode_labels))
-    #pprint(list(zip(selected_ids,selected_acts)))
-    #num_labels = len(set(mode_labels))
     x = torch.tensor(x,device='cuda').float()
     y = torch.tensor(mode_labels,device='cuda').float()
     dset = StepDataset(x,y,device='cuda',window_size=args.window_size,step_size=args.step_size)
@@ -385,33 +413,43 @@ def make_pamap_dset(args,subj_ids):
 def train(args,subj_ids):
     # Make nets
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
-    dset, selected_acts = make_pamap_dset(args,subj_ids) if args.dset=='PAMAP' else make_uci_dset(args)
+    dset, selected_acts = make_pamap_dset(args,subj_ids) if args.dset=='PAMAP' else make_uci_dset(args,subj_ids)
     num_labels = utils.get_num_labels(dset.y)
-    dec = nn.Sequential(
-        nn.ConvTranspose2d(32,16,(30,8),(1,1)),#24
-        nn.BatchNorm2d(16),
-        nn.LeakyReLU(0.3),
-        nn.ConvTranspose2d(16,8,(30,8),(3,1)),#9
-        nn.LeakyReLU(0.3),
-        nn.BatchNorm2d(8),
-        nn.ConvTranspose2d(8,4,(20,6),(2,2)),#2
-        nn.LeakyReLU(0.3),
-        nn.BatchNorm2d(4),
-        nn.ConvTranspose2d(4,1,(10,6),(2,1)),#2
-        nn.LeakyReLU(0.3),
-        nn.BatchNorm2d(1),
-        )
-
-    mlp = nn.Sequential(
-        nn.Linear(32,25),
-        nn.BatchNorm1d(25),
-        nn.LeakyReLU(0.3),
-        nn.Linear(25,num_labels),
-        nn.Softmax()
-        )
-
-    mlp = Var_BS_MLP(32,25,num_labels)
     enc = Enc()
+    mlp = Var_BS_MLP(32,25,num_labels)
+    if args.dset == 'PAMAP':
+        dec = nn.Sequential(
+            nn.ConvTranspose2d(32,16,(30,8),(1,1)),#24
+            nn.BatchNorm2d(16),
+            nn.LeakyReLU(0.3),
+            nn.ConvTranspose2d(16,8,(30,8),(3,1)),#9
+            nn.LeakyReLU(0.3),
+            nn.BatchNorm2d(8),
+            nn.ConvTranspose2d(8,4,(20,6),(2,2)),#2
+            nn.LeakyReLU(0.3),
+            nn.BatchNorm2d(4),
+            nn.ConvTranspose2d(4,1,(10,6),(2,1)),#2
+            nn.LeakyReLU(0.3),
+            nn.BatchNorm2d(1),
+            )
+    elif args.dset == 'UCI-pre':
+        enc = Dense_Net(561,1024,256,32)
+        dec = Dense_Net(32,256,1024,561)
+    else:
+        dec = nn.Sequential(
+            nn.ConvTranspose2d(32,16,(30,2),(1,1)),#24
+            nn.BatchNorm2d(16),
+            nn.LeakyReLU(0.3),
+            nn.ConvTranspose2d(16,8,(30,3),(3,3)),#9
+            nn.LeakyReLU(0.3),
+            nn.BatchNorm2d(8),
+            nn.ConvTranspose2d(8,4,(20,1),(2,1)),#2
+            nn.LeakyReLU(0.3),
+            nn.BatchNorm2d(4),
+            nn.ConvTranspose2d(4,1,(10,1),(2,1)),#2
+            nn.LeakyReLU(0.3),
+            nn.BatchNorm2d(1),
+            )
     if args.load_pretrained:
         enc.load_state_dict(torch.load('enc_pretrained.pt'))
         dec.load_state_dict(torch.load('dec_pretrained.pt'))
@@ -446,24 +484,22 @@ if __name__ == "__main__":
     parser.add_argument('--prob_thresh',type=float,default=.95)
     parser.add_argument('--save','-s',action='store_true')
     parser.add_argument('--step_size',type=int,default=5)
-    parser.add_argument('--subj_ids',type=int,nargs='+',default=[101])
+    parser.add_argument('--subj_ids',type=str,nargs='+',default=[101])
     parser.add_argument('--show_counts',action='store_true')
     parser.add_argument('--test','-t',action='store_true')
     parser.add_argument('--window_size',type=int,default=512)
     ARGS = parser.parse_args()
-    e = Enc().cuda()
-    print(e(torch.ones((128,1,512,561),device='cuda')).shape)
 
     if ARGS.test and ARGS.save:
         print("Shouldn't be saving for a test run"); sys.exit()
     if ARGS.test: ARGS.num_meta_epochs = 2
     else: import umap
-    all_possible_ids = [101,102,103,104,105,106,107,108,109]
-    bad_ids = [x for x in ARGS.subj_ids if x not in all_possible_ids]
-    if len(bad_ids) > 0:
-        print("You have specified non-existent ids: {bad_ids}"); sys.exit()
+    all_possible_ids = [str(x) for x in [101,102,103,104,105,106,107,108,109]] if ARGS.dset == 'PAMAP' else ['01','02']
     if ARGS.all_subjs:
         ARGS.subj_ids=all_possible_ids
+    bad_ids = [x for x in ARGS.subj_ids if x not in all_possible_ids]
+    if len(bad_ids) > 0:
+        print(f"You have specified non-existent ids: {bad_ids}"); sys.exit()
     if ARGS.parallel:
         train(ARGS,subj_ids=ARGS.subj_ids)
     else:
