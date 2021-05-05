@@ -57,65 +57,27 @@ class StepDataset(data.Dataset):
             if window_var < self.split_thresh: total_loss += window_var
         return total_loss
 
-class Enc(nn.Module):
-    def __init__(self):
-        super(Enc,self).__init__()
-        if ARGS.dset == 'PAMAP':
-            self.layer1 = nn.Sequential(
-                nn.Conv2d(1,4,(50,5),(2,1)),
-                nn.BatchNorm2d(4),
+class EncByLayer(nn.Module):
+    def __init__(self,x_filters,y_filters,x_strides,y_strides,max_pools,verbose):
+        super(EncByLayer,self).__init__()
+        self.verbose = verbose
+        num_layers = len(x_filters)
+        assert all(len(x)==num_layers for x in (y_filters,x_strides,y_strides,max_pools))
+        ncvs = [1]+[4*2**i for i in range(num_layers)]
+        conv_layers = [nn.Sequential(
+                nn.Conv2d(ncvs[i],ncvs[i+1],(x_filters[i],y_filters[i]),(x_strides[i],y_strides[i])),
+                nn.BatchNorm2d(ncvs[i+1]),
                 nn.LeakyReLU(0.3),
-                nn.MaxPool2d(2)
-            )
-            self.layer2 = nn.Sequential(
-                nn.Conv2d(4,8,(40,3),(2,1)),
-                nn.LeakyReLU(0.3),
-                nn.BatchNorm2d(8),
-                nn.MaxPool2d(3),
-            )
-            self.layer3 = nn.Sequential(
-                nn.Conv2d(8,16,(5,2),(1,1)),
-                nn.LeakyReLU(0.3),
-                nn.BatchNorm2d(16),
-                nn.MaxPool2d(2),
-            )
-            self.layer4 = nn.Sequential(
-                nn.Conv2d(16,32,(3,1),(1,1)),
-                nn.LeakyReLU(0.3),
-                nn.BatchNorm2d(32),
-                nn.MaxPool2d(2),
-            )
-        else:
-            self.layer1 = nn.Sequential(
-                nn.Conv2d(1,4,(50,1),(2,1)),
-                nn.BatchNorm2d(4),
-                nn.LeakyReLU(0.3),
-                nn.MaxPool2d((2,1))
-            )
-            self.layer2 = nn.Sequential(
-                nn.Conv2d(4,8,(40,1),(2,1)),
-                nn.LeakyReLU(0.3),
-                nn.BatchNorm2d(8),
-                nn.MaxPool2d((3,1)),
-            )
-            self.layer3 = nn.Sequential(
-                nn.Conv2d(8,16,(5,3),(1,3)),
-                nn.LeakyReLU(0.3),
-                nn.BatchNorm2d(16),
-                nn.MaxPool2d((2,1)),
-            )
-            self.layer4 = nn.Sequential(
-                nn.Conv2d(16,32,(4,2)),
-                nn.LeakyReLU(0.3),
-                nn.BatchNorm2d(32),
-            )
+                nn.MaxPool2d(max_pools[i])
+                )
+            for i in range(num_layers)]
+        self.conv_layers = nn.ModuleList(conv_layers)
 
     def forward(self,x):
-        out = self.layer1(x)
-        out = self.layer2(out)
-        out = self.layer3(out)
-        out = self.layer4(out)
-        return out
+        for conv_layer in self.conv_layers:
+            x = conv_layer(x)
+            if self.verbose: print(x.shape)
+        return x
 
 class Dense_Net(nn.Module):
     def __init__(self,*sizes):
@@ -281,12 +243,14 @@ class HARLearner():
     def train_meta_loop(self,num_pre_epochs,num_meta_epochs,num_pseudo_label_epochs,prob_thresh,selected_acts,frac_gt_labels,exp_dir):
         writer = SummaryWriter()
         self.rec_train(num_pre_epochs)
-        gt_idx = np.arange(len(self.dset), step=int(1/frac_gt_labels))
-        try:assert len(gt_idx) - len(self.dset)*frac_gt_labels < 1
-        except:set_trace()
+        if frac_gt_labels <= 0.5:
+            gt_idx = np.arange(len(self.dset), step=int(1/frac_gt_labels))
+        else:
+            non_gt_idx = np.arange(len(self.dset), step=int(1/(1-frac_gt_labels)))
+            gt_idx = np.delete(np.arange(len(self.dset)),non_gt_idx)
+        assert abs(len(gt_idx)/len(self.dset) - frac_gt_labels) < .01
         old_pred_labels = -np.ones(self.dset.y.shape)
         plt.switch_backend('agg')
-        alpha = .5
         prev_weighted_probs = np.zeros((len(self.dset),self.num_classes))
         for epoch_num in range(num_meta_epochs):
             print('Meta Epoch:', epoch_num)
@@ -303,8 +267,10 @@ class HARLearner():
                 old_pred_labels = new_pred_labels
             else:
                 latents = self.get_latents()
-                print('umapping')
-                umapped_latents = umap.UMAP(min_dist=0,n_neighbors=60,n_components=2,random_state=42).fit_transform(latents.squeeze())
+                if ARGS.umap_abl: umapped_latents = latents
+                else:
+                    print('umapping')
+                    umapped_latents = umap.UMAP(min_dist=0,n_neighbors=60,n_components=2,random_state=42).fit_transform(latents.squeeze())
                 print('modelling')
                 model = hmm.GaussianHMM(self.num_classes,'full')
                 model.params = 'mc'
@@ -321,7 +287,7 @@ class HARLearner():
                 utils.scatter_clusters(umapped_latents,self.dset.y,show=False)
                 writer.add_figure(f'umapped_latents/{epoch_num}',fig)
                 if ARGS.save: np.save('test_umapped_latents.npy',umapped_latents)
-                subsample_size = min(30000,int(len(self.dset.y)*frac_gt_labels))
+                subsample_size = min(30000,gt_idx.shape[0])
                 print('translating labelling')
                 trans_dict, leftovers = utils.get_trans_dict(new_pred_labels[gt_idx],self.dset.y[gt_idx],subsample_size=subsample_size)
                 new_pred_labels = np.array([trans_dict[l] for l in new_pred_labels])
@@ -329,11 +295,15 @@ class HARLearner():
                 new_pred_labels = new_pred_labels.astype(np.int)
                 mvns = [multivariate_normal(m,c) for m,c in zip(model.means_,model.covars_)]
                 probs=np.array([mvns[label].pdf(mean) for mean,label in zip(umapped_latents,new_pred_labels)])
-                weighted_probs = probs if epoch_num==0 else alpha*probs + (1-alpha)*prev_weighted_probs
+                weighted_probs = probs if epoch_num==0 else ARGS.alpha*probs + (1-ARGS.alpha)*prev_weighted_probs
+                weighted_probs *= new_pred_probs.max(axis=1)
+                print(weighted_probs.mean())
                 # Scale so max prob is 1 for each dpoint
                 weighted_probs = weighted_probs/max(weighted_probs)
-                weighted_probs *= new_pred_probs.max(axis=1)
-                if ARGS.prob_abl: probs = np.ones(probs.shape)
+                assert weighted_probs.max() == 1
+                print(weighted_probs.mean())
+                if ARGS.probs_abl1: probs = np.ones(probs.shape)
+                if ARGS.probs_abl2: probs = np.zeros(probs.shape)
                 weighted_probs[gt_idx] = 1
             mlp_preds = self.pseudo_label_train(mask=mask,probs=weighted_probs,pseudo_labels=new_pred_labels,num_epochs=num_pseudo_label_epochs,writer=writer,gt_idx=gt_idx)
             print('pseudo label training')
@@ -415,9 +385,14 @@ def train(args,subj_ids):
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
     dset, selected_acts = make_pamap_dset(args,subj_ids) if args.dset=='PAMAP' else make_uci_dset(args,subj_ids)
     num_labels = utils.get_num_labels(dset.y)
-    enc = Enc()
     mlp = Var_BS_MLP(32,25,num_labels)
     if args.dset == 'PAMAP':
+        x_filters = (50,40,5,3)
+        y_filters = (5,3,2,1)
+        x_strides = (2,2,1,1)
+        y_strides = (1,1,1,1)
+        max_pools = (2,3,2,2)
+        enc = EncByLayer(x_filters,y_filters,x_strides,y_strides,max_pools,verbose=args.verbose)
         dec = nn.Sequential(
             nn.ConvTranspose2d(32,16,(30,8),(1,1)),#24
             nn.BatchNorm2d(16),
@@ -435,7 +410,13 @@ def train(args,subj_ids):
     elif args.dset == 'UCI-pre':
         enc = Dense_Net(561,1024,256,32)
         dec = Dense_Net(32,256,1024,561)
-    else:
+    elif args.dset == 'UCI-raw':
+        x_filters = (50,40,5,4)
+        y_filters = (1,1,3,2)
+        x_strides = (2,2,1,1)
+        y_strides = (1,1,3,1)
+        max_pools = ((2,1),(3,1),(2,1),1)
+        enc = EncByLayer(x_filters,y_filters,x_strides,y_strides,max_pools,verbose=args.verbose)
         dec = nn.Sequential(
             nn.ConvTranspose2d(32,16,(30,2),(1,1)),#24
             nn.BatchNorm2d(16),
@@ -466,9 +447,10 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--all_subjs',action='store_true')
+    parser.add_argument('--alpha',type=float,default=.5)
     parser.add_argument('--batch_size',type=int,default=128)
     parser.add_argument('--dec_lr',type=float,default=1e-3)
-    parser.add_argument('--dset',type=str)
+    parser.add_argument('--dset',type=str,default='PAMAP')
     parser.add_argument('--enc_lr',type=float,default=1e-3)
     parser.add_argument('--exp_name',type=str,default="jim")
     parser.add_argument('--frac_gt_labels',type=float,default=0.1)
@@ -480,13 +462,16 @@ if __name__ == "__main__":
     parser.add_argument('--num_pre_epochs',type=int,default=5)
     parser.add_argument('--num_pseudo_label_epochs',type=int,default=5)
     parser.add_argument('--parallel',action='store_true')
-    parser.add_argument('--prob_abl',action='store_true')
+    parser.add_argument('--probs_abl1',action='store_true')
+    parser.add_argument('--probs_abl2',action='store_true')
     parser.add_argument('--prob_thresh',type=float,default=.95)
     parser.add_argument('--save','-s',action='store_true')
     parser.add_argument('--step_size',type=int,default=5)
-    parser.add_argument('--subj_ids',type=str,nargs='+',default=[101])
+    parser.add_argument('--subj_ids',type=str,nargs='+',default=['101'])
     parser.add_argument('--show_counts',action='store_true')
     parser.add_argument('--test','-t',action='store_true')
+    parser.add_argument('--umap_abl',action='store_true')
+    parser.add_argument('--verbose',action='store_true')
     parser.add_argument('--window_size',type=int,default=512)
     ARGS = parser.parse_args()
 
