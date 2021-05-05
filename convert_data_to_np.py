@@ -1,4 +1,6 @@
 from pdb import set_trace
+from mpmath import mp, mpf
+from dl_utils import misc
 import os
 import sys
 import numpy as np
@@ -8,6 +10,21 @@ def array_from_txt(inpath):
         d = f.readlines()
         array = np.array([[float(x) for x in line.split()] for line in d])
     return array
+
+def array_from_txt2(inpath):
+    with open(inpath) as f:
+        d = f.readlines()
+        array = np.array([[float(x) for x in line.strip(';\n').split(',')[2:]] for line in d])
+    return array
+
+def array_expanded(a,expanded_length):
+    if a.shape[0] >= expanded_length: return a
+    insert_every = mpf(a.shape[0]/(expanded_length-a.shape[0]))
+    additional_idxs = (np.arange(expanded_length-a.shape[0])*insert_every).astype(np.int)
+    values = a[additional_idxs]
+    expanded = np.insert(a,additional_idxs,values,axis=0)
+    assert expanded.shape[0] == expanded_length
+    return expanded
 
 def convert(inpath,outpath):
     array = array_from_txt(inpath)
@@ -84,3 +101,21 @@ if __name__ == "__main__":
         print(one_big_y_array.shape)
         np.save('UCI2/X_train.npy',one_big_X_array)
         #np.save('UCI2/y_train.npy',one_big_y_array)
+
+    elif sys.argv[1] == 'WISDM':
+        save_dir = 'wisdm-dataset/np_data'
+        p_dir = 'wisdm-dataset/raw/phone'
+        w_dir = 'wisdm-dataset/raw/watch'
+        mp.dps = 100
+        for user_idx in range(1600,1650):
+            phone_acc = array_from_txt2(os.path.join(p_dir,'accel',f'data_{user_idx}_accel_phone.txt'))
+            watch_acc = array_from_txt2(os.path.join(w_dir,'accel',f'data_{user_idx}_accel_watch.txt'))
+            phone_gyro = array_from_txt2(os.path.join(p_dir,'gyro',f'data_{user_idx}_gyro_phone.txt'))
+            watch_gyro = array_from_txt2(os.path.join(w_dir,'gyro',f'data_{user_idx}_gyro_watch.txt'))
+            user_arrays = [phone_acc,watch_acc,phone_gyro,watch_gyro]
+            max_len = max([a.shape[0] for a in user_arrays])
+            equalized_user_arrays = [array_expanded(a,max_len) for a in user_arrays]
+            total_user_array = np.concatenate(equalized_user_arrays,axis=1)
+            print(total_user_array.shape)
+            user_fn = f'{user_idx}.npy'
+            misc.np_save(total_user_array,save_dir,user_fn)
