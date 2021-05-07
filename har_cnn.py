@@ -15,12 +15,12 @@ import torch.nn as nn
 import numpy as np
 from torch.utils import data
 from torch.utils.tensorboard import SummaryWriter
-import clustering.src.utils as utils
+from dl_utils import misc, tensor_funcs, label_funcs
 
 
 def display(latents_to_display):
     umapped_latents = umap.UMAP(min_dist=0,n_neighbors=30,n_components=2,random_state=42).fit_transform(latents_to_display.squeeze())
-    utils.scatter_clusters(umapped_latents,labels=None,show=True)
+    misc.scatter_clusters(umapped_latents,labels=None,show=True)
 
 class Preprocced_Dataset(data.Dataset):
     def __init__(self,x,y,device):
@@ -158,7 +158,7 @@ class HARLearner():
             best_loss = np.inf
             for idx, (xb,yb,tb) in enumerate(self.dl):
                 latent = self.enc(xb)
-                latent = utils.noiseify(latent,ARGS.noise)
+                latent = tensor_funcs.noiseify(latent,ARGS.noise)
                 pred = self.dec(latent)
                 loss = self.rec_lf(pred,xb)
                 loss.backward()
@@ -201,7 +201,7 @@ class HARLearner():
             assert (pseudo_label_dset.x==self.dset.x).all()
             for batch_idx, (xb,yb,idx) in enumerate(pseudo_label_dl):
                 latent = self.enc(xb)
-                latent = utils.noiseify(latent,ARGS.noise)
+                latent = tensor_funcs.noiseify(latent,ARGS.noise)
                 pseudo_label_pred = self.mlp(latent) if latent.ndim == 2 else self.mlp(latent[:,:,0,0])
                 pseudo_label_loss = self.pseudo_label_lf(pseudo_label_pred,yb.long())
                 try: pseudo_label_loss = (pseudo_label_loss*probs[idx]).mean()
@@ -228,8 +228,7 @@ class HARLearner():
             total_gt_array = self.dset.y.detach().cpu().numpy()[total_idx_array]
             if ARGS.test: break
             try:
-                #print(f'MLP acc: {utils.accuracy(total_pred_array,total_gt_array)}')
-                print(f'MLP non-gt acc: {utils.accuracy(np.delete(total_pred_array,gt_idx),np.delete(total_gt_array,gt_idx))}')
+                print(f'MLP non-gt acc: {label_funcs.accuracy(np.delete(total_pred_array,gt_idx),np.delete(total_gt_array,gt_idx))}')
             except: set_trace()
             if epoch_loss < best_loss:
                 best_loss = epoch_loss
@@ -284,12 +283,12 @@ class HARLearner():
                 new_pred_probs = model.predict_proba(umapped_latents)
                 mask = torch.ones(len(self.dset.y))
                 fig = plt.figure()
-                utils.scatter_clusters(umapped_latents,self.dset.y,show=False)
+                misc.scatter_clusters(umapped_latents,self.dset.y,show=False)
                 writer.add_figure(f'umapped_latents/{epoch_num}',fig)
                 if ARGS.save: np.save('test_umapped_latents.npy',umapped_latents)
                 subsample_size = min(30000,gt_idx.shape[0])
                 print('translating labelling')
-                trans_dict, leftovers = utils.get_trans_dict(new_pred_labels[gt_idx],self.dset.y[gt_idx],subsample_size=subsample_size)
+                trans_dict, leftovers = label_funcs.get_trans_dict(new_pred_labels[gt_idx],self.dset.y[gt_idx],subsample_size=subsample_size)
                 new_pred_labels = np.array([trans_dict[l] for l in new_pred_labels])
                 new_pred_labels[gt_idx] = self.dset.y.detach().cpu().int().numpy()[gt_idx]
                 new_pred_labels = new_pred_labels.astype(np.int)
@@ -312,9 +311,9 @@ class HARLearner():
             if ARGS.show_counts:
                 print('Counts:',counts)
                 print('MLP Counts:',mlp_counts)
-            acc = utils.accuracy(new_pred_labels,self.dset.y)
+            acc = label_funcs.accuracy(new_pred_labels,self.dset.y)
             summary_file_path = os.path.join(exp_dir,'summary.txt')
-            utils.check_dir(exp_dir)
+            misc.check_dir(exp_dir)
             with open(summary_file_path,'w') as f:
                 f.write(str(ARGS))
                 f.write(f'Acc: {acc}')
@@ -322,11 +321,34 @@ class HARLearner():
             prev_weighted_probs = weighted_probs
         # Save models
         if ARGS.save:
-            utils.torch_save({'enc':self.enc,'dec':self.dec,'mlp':self.mlp},exp_dir,f'har_learner{ARGS.exp_name}.pt')
-            utils.np_save(umapped_latents,exp_dir,f'umapped_latents{ARGS.exp_name}.npy')
-            utils.np_save(new_pred_labels,exp_dir,f'preds{ARGS.exp_name}.npy')
+            misc.torch_save({'enc':self.enc,'dec':self.dec,'mlp':self.mlp},exp_dir,f'har_learner{ARGS.exp_name}.pt')
+            misc.np_save(umapped_latents,exp_dir,f'umapped_latents{ARGS.exp_name}.npy')
+            misc.np_save(new_pred_labels,exp_dir,f'preds{ARGS.exp_name}.npy')
             with open(os.path.join(exp_dir,f'HMM{ARGS.exp_name}.pkl'), 'wb') as f: pickle.dump(model,f)
 
+
+def make_wisdm_dset(args,subj_ids):
+    with open('wisdm-dataset/activity_key.txt') as f: r=f.readlines()
+    activities_list = [x.split(' = ')[0] for x in r if ' = ' in x]
+    action_name_dict = dict(zip(range(len(activities_list)),activities_list))
+    x = np.concatenate([np.load(f'wisdm-dataset/np_data/{s}.npy') for s in subj_ids])
+    y = np.concatenate([np.load(f'wisdm-dataset/np_data/{s}_labels.npy') for s in subj_ids])
+    certains = np.concatenate([np.load(f'wisdm-dataset/np_data/{s}_certains.npy') for s in subj_ids])
+    x = x[certains]
+    y = y[certains]
+    xnans = np.isnan(x).any(axis=1)
+    x = x[~xnans]
+    y = y[~xnans]
+    num_windows = (len(x) - args.window_size)//args.step_size + 1
+    mode_labels = np.concatenate([stats.mode(y[w*args.step_size:w*args.step_size + args.window_size]).mode for w in range(num_windows)])
+    selected_ids = set(mode_labels)
+    selected_acts = [action_name_dict[act_id] for act_id in selected_ids]
+    mode_labels, trans_dict, changed = label_funcs.compress_labels(mode_labels)
+    assert len(selected_acts) == len(set(mode_labels))
+    x = torch.tensor(x,device='cuda').float()
+    y = torch.tensor(mode_labels,device='cuda').float()
+    dset = StepDataset(x,y,device='cuda',window_size=args.window_size,step_size=args.step_size)
+    return dset, selected_acts
 
 def make_uci_dset(args,subj_ids):
     action_name_dict = {1:'walking',2:'walking upstairs',3:'walking downstairs',4:'sitting',5:'standing',6:'lying',7:'stand_to_sit',9:'sit_to_stand',10:'sit_to_lit',11:'lie_to_sit',12:'stand_to_lie',13:'lie_to_stand'}
@@ -353,7 +375,7 @@ def make_uci_dset(args,subj_ids):
         mode_labels = np.concatenate([stats.mode(y[w*args.step_size:w*args.step_size + args.window_size]).mode for w in range(num_windows)])
         selected_ids = set(mode_labels)
         selected_acts = [action_name_dict[act_id] for act_id in selected_ids]
-        mode_labels, trans_dict, changed = utils.compress_labels(mode_labels)
+        mode_labels, trans_dict, changed = label_funcs.compress_labels(mode_labels)
         assert len(selected_acts) == len(set(mode_labels))
         x = torch.tensor(x,device='cuda').float()
         y = torch.tensor(mode_labels,device='cuda').float()
@@ -373,7 +395,7 @@ def make_pamap_dset(args,subj_ids):
     mode_labels = np.concatenate([stats.mode(y[w*args.step_size:w*args.step_size + args.window_size]).mode for w in range(num_windows)])
     selected_ids = set(mode_labels)
     selected_acts = [action_name_dict[act_id] for act_id in selected_ids]
-    mode_labels, trans_dict, changed = utils.compress_labels(mode_labels)
+    mode_labels, trans_dict, changed = label_funcs.compress_labels(mode_labels)
     assert len(selected_acts) == len(set(mode_labels))
     x = torch.tensor(x,device='cuda').float()
     y = torch.tensor(mode_labels,device='cuda').float()
@@ -383,8 +405,10 @@ def make_pamap_dset(args,subj_ids):
 def train(args,subj_ids):
     # Make nets
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
-    dset, selected_acts = make_pamap_dset(args,subj_ids) if args.dset=='PAMAP' else make_uci_dset(args,subj_ids)
-    num_labels = utils.get_num_labels(dset.y)
+    if args.dset=='PAMAP': dset, selected_acts = make_pamap_dset(args,subj_ids)
+    elif args.dset in ['UCI-pre','UCI-raw']: dset, selected_acts = make_uci_dset(args,subj_ids)
+    elif args.dset == 'WISDM': dset, selected_acts = make_wisdm_dset(args,subj_ids)
+    num_labels = label_funcs.get_num_labels(dset.y)
     mlp = Var_BS_MLP(32,25,num_labels)
     if args.dset == 'PAMAP':
         x_filters = (50,40,5,3)
@@ -431,6 +455,27 @@ def train(args,subj_ids):
             nn.LeakyReLU(0.3),
             nn.BatchNorm2d(1),
             )
+    elif args.dset == 'WISDM':
+        x_filters = (50,40,5,4)
+        y_filters = (1,1,3,4)
+        x_strides = (2,2,1,1)
+        y_strides = (1,1,3,1)
+        max_pools = ((2,1),(3,1),(2,1),1)
+        enc = EncByLayer(x_filters,y_filters,x_strides,y_strides,max_pools,verbose=args.verbose)
+        dec = nn.Sequential(
+            nn.ConvTranspose2d(32,16,(30,4),(1,1)),#24
+            nn.BatchNorm2d(16),
+            nn.LeakyReLU(0.3),
+            nn.ConvTranspose2d(16,8,(30,3),(3,3)),#9
+            nn.LeakyReLU(0.3),
+            nn.BatchNorm2d(8),
+            nn.ConvTranspose2d(8,4,(20,1),(2,1)),#2
+            nn.LeakyReLU(0.3),
+            nn.BatchNorm2d(4),
+            nn.ConvTranspose2d(4,1,(10,1),(2,1)),#2
+            nn.LeakyReLU(0.3),
+            nn.BatchNorm2d(1),
+            )
     if args.load_pretrained:
         enc.load_state_dict(torch.load('enc_pretrained.pt'))
         dec.load_state_dict(torch.load('dec_pretrained.pt'))
@@ -450,7 +495,7 @@ if __name__ == "__main__":
     parser.add_argument('--alpha',type=float,default=.5)
     parser.add_argument('--batch_size',type=int,default=128)
     parser.add_argument('--dec_lr',type=float,default=1e-3)
-    parser.add_argument('--dset',type=str,default='PAMAP')
+    parser.add_argument('--dset',type=str,default='PAMAP',choices=['PAMAP','UCI-pre','UCI-raw','WISDM'])
     parser.add_argument('--enc_lr',type=float,default=1e-3)
     parser.add_argument('--exp_name',type=str,default="jim")
     parser.add_argument('--frac_gt_labels',type=float,default=0.1)
@@ -467,7 +512,7 @@ if __name__ == "__main__":
     parser.add_argument('--prob_thresh',type=float,default=.95)
     parser.add_argument('--save','-s',action='store_true')
     parser.add_argument('--step_size',type=int,default=5)
-    parser.add_argument('--subj_ids',type=str,nargs='+',default=['101'])
+    parser.add_argument('--subj_ids',type=str,nargs='+',default=['first'])
     parser.add_argument('--show_counts',action='store_true')
     parser.add_argument('--test','-t',action='store_true')
     parser.add_argument('--umap_abl',action='store_true')
@@ -479,9 +524,15 @@ if __name__ == "__main__":
         print("Shouldn't be saving for a test run"); sys.exit()
     if ARGS.test: ARGS.num_meta_epochs = 2
     else: import umap
-    all_possible_ids = [str(x) for x in [101,102,103,104,105,106,107,108,109]] if ARGS.dset == 'PAMAP' else ['01','02']
-    if ARGS.all_subjs:
-        ARGS.subj_ids=all_possible_ids
+    if ARGS.dset == 'PAMAP':
+        all_possible_ids = [str(x) for x in range(101,110)]
+    elif ARGS.dset in ['UCI-pre','UCI-raw']:
+        def two_digitify(x): return '0' + str(x) if len(str(x))==1 else str(x)
+        all_possible_ids = [two_digitify(x) for x in range(1,30)]
+    elif ARGS.dset == 'WISDM':
+        all_possible_ids = [str(x) for x in range(1600,1651)]
+    if ARGS.subj_ids == ['first']: ARGS.subj_ids = all_possible_ids[:1]
+    if ARGS.all_subjs: ARGS.subj_ids=all_possible_ids
     bad_ids = [x for x in ARGS.subj_ids if x not in all_possible_ids]
     if len(bad_ids) > 0:
         print(f"You have specified non-existent ids: {bad_ids}"); sys.exit()
