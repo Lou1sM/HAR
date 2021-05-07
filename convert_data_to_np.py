@@ -1,6 +1,7 @@
 from pdb import set_trace
+from scipy import stats
 from mpmath import mp, mpf
-from dl_utils import misc
+from dl_utils import misc, label_funcs
 import os
 import sys
 import numpy as np
@@ -9,12 +10,6 @@ def array_from_txt(inpath):
     with open(inpath) as f:
         d = f.readlines()
         array = np.array([[float(x) for x in line.split()] for line in d])
-    return array
-
-def array_from_txt2(inpath):
-    with open(inpath) as f:
-        d = f.readlines()
-        array = np.array([[float(x) for x in line.strip(';\n').split(',')[2:]] for line in d])
     return array
 
 def array_expanded(a,expanded_length):
@@ -100,22 +95,45 @@ if __name__ == "__main__":
         one_big_y_array = np.squeeze(array_from_txt('UCI2/UCI HAR Dataset/train/y_train.txt'),axis=1)
         print(one_big_y_array.shape)
         np.save('UCI2/X_train.npy',one_big_X_array)
-        #np.save('UCI2/y_train.npy',one_big_y_array)
+        np.save('UCI2/y_train.npy',one_big_y_array)
 
     elif sys.argv[1] == 'WISDM':
-        save_dir = 'wisdm-dataset/np_data'
         p_dir = 'wisdm-dataset/raw/phone'
         w_dir = 'wisdm-dataset/raw/watch'
-        mp.dps = 100
-        for user_idx in range(1600,1650):
-            phone_acc = array_from_txt2(os.path.join(p_dir,'accel',f'data_{user_idx}_accel_phone.txt'))
-            watch_acc = array_from_txt2(os.path.join(w_dir,'accel',f'data_{user_idx}_accel_watch.txt'))
-            phone_gyro = array_from_txt2(os.path.join(p_dir,'gyro',f'data_{user_idx}_gyro_phone.txt'))
-            watch_gyro = array_from_txt2(os.path.join(w_dir,'gyro',f'data_{user_idx}_gyro_watch.txt'))
+        save_dir = 'wisdm-dataset/np_data'
+        mp.dps = 100 # Avoid floating point errors in label insertion function
+        for user_idx in range(1650,1651):
+            phone_acc_path = os.path.join(p_dir,'accel',f'data_{user_idx}_accel_phone.txt')
+            watch_acc_path = os.path.join(w_dir,'accel',f'data_{user_idx}_accel_watch.txt')
+            phone_gyro_path = os.path.join(p_dir,'gyro',f'data_{user_idx}_gyro_phone.txt')
+            watch_gyro_path = os.path.join(w_dir,'gyro',f'data_{user_idx}_gyro_watch.txt')
+
+            label_codes_list = list('ABCDEFGHIJKLMOPQRS')
+            def two_arrays_from_txt(inpath):
+                with open(inpath) as f:
+                    d = f.readlines()
+                    arr = np.array([[float(x) for x in line.strip(';\n').split(',')[3:]] for line in d])
+                    label_array = np.array([label_codes_list.index(line.split(',')[1]) for line in d])
+                return arr, label_array
+
+            phone_acc, label_array1 = two_arrays_from_txt(phone_acc_path)
+            watch_acc, label_array2 = two_arrays_from_txt(watch_acc_path)
+            phone_gyro, label_array3 = two_arrays_from_txt(phone_gyro_path)
+            watch_gyro, label_array4 = two_arrays_from_txt(watch_gyro_path)
             user_arrays = [phone_acc,watch_acc,phone_gyro,watch_gyro]
+            label_arrays = [label_array1,label_array2,label_array3,label_array4]
             max_len = max([a.shape[0] for a in user_arrays])
             equalized_user_arrays = [array_expanded(a,max_len) for a in user_arrays]
+            equalized_label_arrays = [array_expanded(lab_a,max_len) for lab_a in label_arrays]
             total_user_array = np.concatenate(equalized_user_arrays,axis=1)
             print(total_user_array.shape)
+            mode_object = stats.mode(np.stack(equalized_label_arrays,axis=1),axis=1)
+            mode_labels = mode_object.mode[:,0]
+            print('Agreement in labels:',label_funcs.label_counts(mode_object.count[:,0]))
+            certains = (mode_object.count == 4)[:,0]
             user_fn = f'{user_idx}.npy'
             misc.np_save(total_user_array,save_dir,user_fn)
+            user_labels_fn = f'{user_idx}_labels.npy'
+            misc.np_save(mode_labels,save_dir,user_labels_fn)
+            user_certains_fn = f'{user_idx}_certains.npy'
+            misc.np_save(certains,save_dir,user_certains_fn)
