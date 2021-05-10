@@ -102,7 +102,7 @@ if __name__ == "__main__":
         w_dir = 'wisdm-dataset/raw/watch'
         save_dir = 'wisdm-dataset/np_data'
         mp.dps = 100 # Avoid floating point errors in label insertion function
-        for user_idx in range(1650,1651):
+        for user_idx in range(1600,1651):
             phone_acc_path = os.path.join(p_dir,'accel',f'data_{user_idx}_accel_phone.txt')
             watch_acc_path = os.path.join(w_dir,'accel',f'data_{user_idx}_accel_watch.txt')
             phone_gyro_path = os.path.join(p_dir,'gyro',f'data_{user_idx}_gyro_phone.txt')
@@ -137,3 +137,5 @@ if __name__ == "__main__":
             misc.np_save(mode_labels,save_dir,user_labels_fn)
             user_certains_fn = f'{user_idx}_certains.npy'
             misc.np_save(certains,save_dir,user_certains_fn)
+
+    else: print('\nIncorrect or no dataset specified\n')
