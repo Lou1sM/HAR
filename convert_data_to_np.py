@@ -97,7 +97,7 @@ if __name__ == "__main__":
         np.save('UCI2/X_train.npy',one_big_X_array)
         np.save('UCI2/y_train.npy',one_big_y_array)
 
-    elif sys.argv[1] == 'WISDM':
+    elif sys.argv[1] == 'WISDM-watch':
         p_dir = 'wisdm-dataset/raw/phone'
         w_dir = 'wisdm-dataset/raw/watch'
         save_dir = 'wisdm-dataset/np_data'
@@ -138,4 +138,42 @@ if __name__ == "__main__":
             user_certains_fn = f'{user_idx}_certains.npy'
             misc.np_save(certains,save_dir,user_certains_fn)
 
+    elif sys.argv[1] == 'WISDM-v1':
+        with open('WISDM_ar_v1.1/WISDM_ar_v1.1_raw.txt') as f: text = f.readlines()
+        activities_list = ['Jogging','Walking','Upstairs','Downstairs','Standing','Sitting']
+        X_list = []
+        y_list = []
+        users_list = []
+        def process_line(line_to_process):
+            if float(line_to_process.split(',')[2]) == 0: print("Timestamp zero, discarding")
+            else:
+                X_list.append([float(x) for x in line_to_process.split(',')[3:]])
+                y_list.append(activities_list.index(line_to_process.split(',')[1]))
+                users_list.append(line_to_process.split(',')[0])
+        for i,raw_line in enumerate(text):
+            #line = line.replace(';','').replace('\n','')
+            if raw_line == '\n': continue
+            elif raw_line.endswith(',;\n'): line = raw_line[:-3]
+            elif raw_line.endswith(';\n'): line = raw_line[:-2]
+            elif raw_line.endswith(',\n'): line = raw_line[:-2]
+            else: set_trace()
+            if len(line.split(',')) == 6:
+                try: process_line(line)
+                except: print("Can't process line {i}, even though length 6: {raw_line}\n")
+            else:
+                print(f"Bad format at line {i}:\n{raw_line}")
+                try:
+                    line1, line2 = line.split(';')
+                    process_line(line1); process_line(line2)
+                    print(f"Processing separately as\n{line1}\nand\n{line2}")
+                except: print("Can't process this line\n")
+        one_big_X_array = np.array(X_list)
+        one_big_y_array = np.array(y_list)
+        one_big_users_array = np.array(users_list)
+        print(one_big_X_array.shape)
+        print(one_big_y_array.shape)
+        print(one_big_users_array.shape)
+        misc.np_save(one_big_X_array,'wisdm_v1','X.npy')
+        misc.np_save(one_big_y_array,'wisdm_v1','y.npy')
+        misc.np_save(one_big_users_array,'wisdm_v1','users.npy')
     else: print('\nIncorrect or no dataset specified\n')
