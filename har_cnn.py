@@ -327,7 +327,33 @@ class HARLearner():
             with open(os.path.join(exp_dir,f'HMM{ARGS.exp_name}.pkl'), 'wb') as f: pickle.dump(model,f)
 
 
-def make_wisdm_dset(args,subj_ids):
+def make_wisdm_v1_dset(args,subj_ids):
+    activities_list = ['Jogging','Walking','Upstairs','Downstairs','Standing','Sitting']
+    action_name_dict = dict(zip(range(len(activities_list)),activities_list))
+    x = np.load('wisdm_v1/X.npy')
+    y = np.load('wisdm_v1/y.npy')
+    users = np.load('wisdm_v1/users.npy')
+    idxs_to_user = np.zeros(users.shape[0]).astype(np.bool)
+    for subj_id in subj_ids:
+        new_users = users==subj_id
+        idxs_to_user = np.logical_or(idxs_to_user,new_users)
+    x = x[idxs_to_user]
+    y = y[idxs_to_user]
+    xnans = np.isnan(x).any(axis=1)
+    x = x[~xnans]
+    y = y[~xnans]
+    num_windows = (len(x) - args.window_size)//args.step_size + 1
+    mode_labels = np.concatenate([stats.mode(y[w*args.step_size:w*args.step_size + args.window_size]).mode for w in range(num_windows)])
+    selected_ids = set(mode_labels)
+    selected_acts = [action_name_dict[act_id] for act_id in selected_ids]
+    mode_labels, trans_dict, changed = label_funcs.compress_labels(mode_labels)
+    assert len(selected_acts) == len(set(mode_labels))
+    x = torch.tensor(x,device='cuda').float()
+    y = torch.tensor(mode_labels,device='cuda').float()
+    dset = StepDataset(x,y,device='cuda',window_size=args.window_size,step_size=args.step_size)
+    return dset, selected_acts
+
+def make_wisdm_watch_dset(args,subj_ids):
     with open('wisdm-dataset/activity_key.txt') as f: r=f.readlines()
     activities_list = [x.split(' = ')[0] for x in r if ' = ' in x]
     action_name_dict = dict(zip(range(len(activities_list)),activities_list))
@@ -403,11 +429,11 @@ def make_pamap_dset(args,subj_ids):
     return dset, selected_acts
 
 def train(args,subj_ids):
-    # Make nets
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
     if args.dset=='PAMAP': dset, selected_acts = make_pamap_dset(args,subj_ids)
     elif args.dset in ['UCI-pre','UCI-raw']: dset, selected_acts = make_uci_dset(args,subj_ids)
-    elif args.dset == 'WISDM': dset, selected_acts = make_wisdm_dset(args,subj_ids)
+    elif args.dset == 'WISDM-watch': dset, selected_acts = make_wisdm_watch_dset(args,subj_ids)
+    elif args.dset == 'WISDM-v1': dset, selected_acts = make_wisdm_v1_dset(args,subj_ids)
     num_labels = label_funcs.get_num_labels(dset.y)
     mlp = Var_BS_MLP(32,25,num_labels)
     if args.dset == 'PAMAP':
@@ -455,18 +481,39 @@ def train(args,subj_ids):
             nn.LeakyReLU(0.3),
             nn.BatchNorm2d(1),
             )
-    elif args.dset == 'WISDM':
+    elif args.dset == 'WISDM-watch':
         x_filters = (50,40,5,4)
-        y_filters = (1,1,3,4)
+        y_filters = (1,1,3,2)
         x_strides = (2,2,1,1)
         y_strides = (1,1,3,1)
         max_pools = ((2,1),(3,1),(2,1),1)
         enc = EncByLayer(x_filters,y_filters,x_strides,y_strides,max_pools,verbose=args.verbose)
         dec = nn.Sequential(
-            nn.ConvTranspose2d(32,16,(30,4),(1,1)),#24
+            nn.ConvTranspose2d(32,16,(30,2),(1,1)),#24
             nn.BatchNorm2d(16),
             nn.LeakyReLU(0.3),
             nn.ConvTranspose2d(16,8,(30,3),(3,3)),#9
+            nn.LeakyReLU(0.3),
+            nn.BatchNorm2d(8),
+            nn.ConvTranspose2d(8,4,(20,1),(2,1)),#2
+            nn.LeakyReLU(0.3),
+            nn.BatchNorm2d(4),
+            nn.ConvTranspose2d(4,1,(10,1),(2,1)),#2
+            nn.LeakyReLU(0.3),
+            nn.BatchNorm2d(1),
+            )
+    elif args.dset == 'WISDM-v1':
+        x_filters = (50,40,5,4)
+        y_filters = (1,1,2,2)
+        x_strides = (2,2,1,1)
+        y_strides = (1,1,1,1)
+        max_pools = ((2,1),(3,1),(2,1),1)
+        enc = EncByLayer(x_filters,y_filters,x_strides,y_strides,max_pools,verbose=args.verbose)
+        dec = nn.Sequential(
+            nn.ConvTranspose2d(32,16,(30,2),(1,1)),#24
+            nn.BatchNorm2d(16),
+            nn.LeakyReLU(0.3),
+            nn.ConvTranspose2d(16,8,(30,2),(3,1)),#9
             nn.LeakyReLU(0.3),
             nn.BatchNorm2d(8),
             nn.ConvTranspose2d(8,4,(20,1),(2,1)),#2
@@ -490,12 +537,13 @@ def train(args,subj_ids):
 
 if __name__ == "__main__":
 
+    dset_options = ['PAMAP','UCI-pre','UCI-raw','WISDM-v1','WISDM-watch']
     parser = argparse.ArgumentParser()
     parser.add_argument('--all_subjs',action='store_true')
     parser.add_argument('--alpha',type=float,default=.5)
     parser.add_argument('--batch_size',type=int,default=128)
     parser.add_argument('--dec_lr',type=float,default=1e-3)
-    parser.add_argument('--dset',type=str,default='PAMAP',choices=['PAMAP','UCI-pre','UCI-raw','WISDM'])
+    parser.add_argument('--dset',type=str,default='PAMAP',choices=dset_options)
     parser.add_argument('--enc_lr',type=float,default=1e-3)
     parser.add_argument('--exp_name',type=str,default="jim")
     parser.add_argument('--frac_gt_labels',type=float,default=0.1)
@@ -529,8 +577,10 @@ if __name__ == "__main__":
     elif ARGS.dset in ['UCI-pre','UCI-raw']:
         def two_digitify(x): return '0' + str(x) if len(str(x))==1 else str(x)
         all_possible_ids = [two_digitify(x) for x in range(1,30)]
-    elif ARGS.dset == 'WISDM':
+    elif ARGS.dset == 'WISDM-watch':
         all_possible_ids = [str(x) for x in range(1600,1651)]
+    elif ARGS.dset == 'WISDM-v1':
+        all_possible_ids = [str(x) for x in range(1,30)]
     if ARGS.subj_ids == ['first']: ARGS.subj_ids = all_possible_ids[:1]
     if ARGS.all_subjs: ARGS.subj_ids=all_possible_ids
     bad_ids = [x for x in ARGS.subj_ids if x not in all_possible_ids]
