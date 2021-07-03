@@ -380,6 +380,8 @@ class HARLearner():
         gt_mask = np.zeros(len(self.dset))
         gt_mask[gt_idx] = 1
         assert abs(len(gt_idx)/len(self.dset) - frac_gt_labels) < .01
+        self.enc.train()
+        self.mlp.train()
         for epoch in range(num_epochs):
             epoch_loss = 0
             epoch_rec_losses = []
@@ -393,11 +395,11 @@ class HARLearner():
                latent = self.enc(xb)
                latent = tensor_funcs.noiseify(latent,ARGS.noise)
                batch_mask = gt_mask[idx]
-               label_pred = self.mlp(latent[batch_mask]) if latent.ndim == 2 else self.mlp(latent[:,:,0,0][batch_mask])
-               label_loss = self.pseudo_label_lf(label_pred,yb.long()[batch_mask])
+               label_pred = self.mlp(latent) if latent.ndim == 2 else self.mlp(latent[:,:,0,0])
+               label_loss = self.pseudo_label_lf(label_pred,yb.long())
                rec_pred = self.dec(latent)
                rec_loss = self.rec_lf(rec_pred,xb)
-               loss = label_loss.mean() + rec_loss
+               loss = label_loss[batch_mask].mean() + rec_loss
                if math.isnan(loss): set_trace()
                loss.backward()
                self.enc_opt.step(); self.enc_opt.zero_grad()
