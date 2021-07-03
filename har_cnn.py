@@ -13,6 +13,7 @@ from hmmlearn import hmm
 import torch
 import torch.nn as nn
 import numpy as np
+import time
 from torch.utils import data
 from torch.utils.tensorboard import SummaryWriter
 from dl_utils import misc, tensor_funcs, label_funcs
@@ -167,7 +168,6 @@ class HARLearner():
                 epoch_loss += (loss.item()-epoch_loss)/(idx+1)
                 if ARGS.test: break
             if ARGS.test: break
-            print(epoch_loss)
             if epoch_loss < best_loss:
                 best_loss = epoch_loss
                 count = 0
@@ -177,7 +177,7 @@ class HARLearner():
         torch.save(self.enc.state_dict(),'enc_pretrained.pt')
         torch.save(self.dec.state_dict(),'dec_pretrained.pt')
 
-    def pseudo_label_train(self,mask,probs,pseudo_labels,num_epochs,writer,gt_idx,position_in_meta_loop=0):
+    def pseudo_label_train(self,mask,probs,pseudo_labels,num_epochs,writer,gt_idx,meta_loop_idx,exp_dir,prev_best_acc):
         self.enc.train()
         if isinstance(pseudo_labels,np.ndarray):
             pseudo_labels = torch.tensor(pseudo_labels)
@@ -188,7 +188,10 @@ class HARLearner():
             pseudo_label_dset = StepDataset(self.dset.x,pseudo_labels,device='cuda',window_size=self.dset.window_size,step_size=self.dset.step_size)
         pseudo_label_dl = data.DataLoader(pseudo_label_dset,batch_sampler=data.BatchSampler(data.RandomSampler(pseudo_label_dset),self.batch_size,drop_last=False),pin_memory=False)
         all_pseudo_label_losses = []
-        start_indexing_at = position_in_meta_loop*num_epochs*len(pseudo_label_dl)
+        start_indexing_at = meta_loop_idx*num_epochs*len(pseudo_label_dl)
+        best_gt_acc = prev_best_acc
+        best_non_gt_acc = 0
+        best_non_gt_f1 = 0
         for epoch in range(num_epochs):
             epoch_loss = 0
             epoch_rec_losses = []
@@ -226,10 +229,26 @@ class HARLearner():
             total_pred_array = np.concatenate(total_pred_list)
             total_idx_array = np.concatenate(total_idx_list)
             total_gt_array = self.dset.y.detach().cpu().numpy()[total_idx_array]
+            total_pred_array_ordered = np.array([item[0] for item in sorted(zip(total_pred_array,total_idx_array),key=lambda x:x[1])])
             if ARGS.test: break
-            try:
-                print(f'MLP non-gt acc: {label_funcs.accuracy(np.delete(total_pred_array,gt_idx),np.delete(total_gt_array,gt_idx))}')
-            except: set_trace()
+            non_gt_acc2 = label_funcs.accuracy(np.delete(total_pred_array,gt_idx),np.delete(total_gt_array,gt_idx))
+            non_gt_acc = label_funcs.accuracy(np.delete(total_pred_array_ordered,gt_idx),np.delete(self.dset.y.detach().cpu().numpy(),gt_idx))
+            non_gt_f1 = mean_f1(np.delete(total_pred_array_ordered,gt_idx),np.delete(self.dset.y.detach().cpu().numpy(),gt_idx))
+            gt_acc = -1 if len(gt_idx) == 0 else label_funcs.accuracy(total_pred_array_ordered[gt_idx],self.dset.y.detach().cpu().numpy()[gt_idx])
+            gt_mean_f1 = -1 if len(gt_idx) == 0 else mean_f1(total_pred_array_ordered[gt_idx],self.dset.y.detach().cpu().numpy()[gt_idx])
+            full_acc = label_funcs.accuracy(total_pred_array,total_gt_array)
+            full_acc2 = label_funcs.accuracy(total_pred_array_ordered,self.dset.y.detach().cpu().numpy())
+            assert full_acc==full_acc2
+            if not ARGS.suppress_prints:
+                print(f'MLP non-gt acc: {non_gt_acc} {non_gt_acc2}')
+                print(f'MLP gt acc: {gt_acc}')
+                print(f'MLP non-gt mean_f1: {non_gt_f1}')
+                print(f'MLP gt mean_f1: {gt_mean_f1}')
+            if gt_acc > best_gt_acc:
+                best_gt_acc=gt_acc
+                best_non_gt_acc=non_gt_acc
+                best_non_gt_f1=non_gt_f1
+                misc.torch_save({'enc':self.enc,'dec':self.dec,'mlp':self.mlp},exp_dir,'best_model.pt')
             if epoch_loss < best_loss:
                 best_loss = epoch_loss
                 count = 0
@@ -237,12 +256,14 @@ class HARLearner():
                 count += 1
             if count > 4: break
             assert (pseudo_label_dset.x==self.dset.x).all()
-        return total_pred_array
+        return total_pred_array_ordered, best_gt_acc, best_non_gt_acc, best_non_gt_f1
 
     def train_meta_loop(self,num_pre_epochs,num_meta_epochs,num_pseudo_label_epochs,prob_thresh,selected_acts,frac_gt_labels,exp_dir):
         writer = SummaryWriter()
         self.rec_train(num_pre_epochs)
-        if frac_gt_labels <= 0.5:
+        if frac_gt_labels == 0:
+            gt_idx = np.array([], dtype=np.int)
+        elif frac_gt_labels <= 0.5:
             gt_idx = np.arange(len(self.dset), step=int(1/frac_gt_labels))
         else:
             non_gt_idx = np.arange(len(self.dset), step=int(1/(1-frac_gt_labels)))
@@ -251,8 +272,12 @@ class HARLearner():
         old_pred_labels = -np.ones(self.dset.y.shape)
         plt.switch_backend('agg')
         prev_weighted_probs = np.zeros((len(self.dset),self.num_classes))
+        best_gt_acc = 0
+        best_non_gt_acc = 0
+        best_mlp_acc = 0
+        peak_acc_at = 0
         for epoch_num in range(num_meta_epochs):
-            print('Meta Epoch:', epoch_num)
+            if not ARGS.suppress_prints: print('Meta Epoch:', epoch_num)
             if ARGS.test:
                 num_tiles = len(self.dset.y)//self.num_classes
                 new_pred_labels = np.tile(np.arange(self.num_classes),num_tiles).astype(np.long)
@@ -268,9 +293,7 @@ class HARLearner():
                 latents = self.get_latents()
                 if ARGS.umap_abl: umapped_latents = latents
                 else:
-                    print('umapping')
                     umapped_latents = umap.UMAP(min_dist=0,n_neighbors=60,n_components=2,random_state=42).fit_transform(latents.squeeze())
-                print('modelling')
                 model = hmm.GaussianHMM(self.num_classes,'full')
                 model.params = 'mc'
                 model.init_params = 'mc'
@@ -286,9 +309,10 @@ class HARLearner():
                 misc.scatter_clusters(umapped_latents,self.dset.y,show=False)
                 writer.add_figure(f'umapped_latents/{epoch_num}',fig)
                 if ARGS.save: np.save('test_umapped_latents.npy',umapped_latents)
-                subsample_size = min(30000,gt_idx.shape[0])
-                print('translating labelling')
-                trans_dict, leftovers = label_funcs.get_trans_dict(new_pred_labels[gt_idx],self.dset.y[gt_idx],subsample_size=subsample_size)
+                #subsample_size = min(30000,gt_idx.shape[0])
+                subsample_size = min(30000,self.dset.y.shape[0])
+                #trans_dict, leftovers = label_funcs.get_trans_dict(new_pred_labels[gt_idx],self.dset.y[gt_idx],subsample_size=subsample_size)
+                trans_dict, leftovers = label_funcs.get_trans_dict(new_pred_labels,self.dset.y,subsample_size=subsample_size)
                 new_pred_labels = np.array([trans_dict[l] for l in new_pred_labels])
                 new_pred_labels[gt_idx] = self.dset.y.detach().cpu().int().numpy()[gt_idx]
                 new_pred_labels = new_pred_labels.astype(np.int)
@@ -296,29 +320,41 @@ class HARLearner():
                 probs=np.array([mvns[label].pdf(mean) for mean,label in zip(umapped_latents,new_pred_labels)])
                 weighted_probs = probs if epoch_num==0 else ARGS.alpha*probs + (1-ARGS.alpha)*prev_weighted_probs
                 weighted_probs *= new_pred_probs.max(axis=1)
-                print(weighted_probs.mean())
                 # Scale so max prob is 1 for each dpoint
                 weighted_probs = weighted_probs/max(weighted_probs)
                 assert weighted_probs.max() == 1
-                print(weighted_probs.mean())
-                if ARGS.probs_abl1: probs = np.ones(probs.shape)
-                if ARGS.probs_abl2: probs = np.zeros(probs.shape)
+                if ARGS.probs_abl1: weighted_probs = np.ones(probs.shape)
+                if ARGS.probs_abl2: weighted_probs = np.zeros(probs.shape)
+                if not ARGS.suppress_prints: print(weighted_probs.mean())
                 weighted_probs[gt_idx] = 1
-            mlp_preds = self.pseudo_label_train(mask=mask,probs=weighted_probs,pseudo_labels=new_pred_labels,num_epochs=num_pseudo_label_epochs,writer=writer,gt_idx=gt_idx)
-            print('pseudo label training')
+            if not ARGS.suppress_prints:
+                print('pseudo label training')
+                print('best_gt_acc:', best_gt_acc)
+                print('best_non_gt_acc:', best_non_gt_acc)
+            mlp_preds, new_best_gt_acc, new_best_non_gt_acc, new_best_non_gt_f1 = self.pseudo_label_train(mask=mask,probs=weighted_probs,pseudo_labels=new_pred_labels,num_epochs=num_pseudo_label_epochs,writer=writer,gt_idx=gt_idx,prev_best_acc=best_gt_acc,meta_loop_idx=epoch_num,exp_dir=exp_dir)
             counts = {selected_acts[item]:sum(new_pred_labels==item) for item in set(new_pred_labels)}
             mlp_counts = {selected_acts[item]:sum(mlp_preds==item) for item in set(mlp_preds)}
-            if ARGS.show_counts:
+            prev_weighted_probs = weighted_probs
+            if ARGS.test or len(gt_idx) == 0 or new_best_gt_acc > best_gt_acc:
+                peak_acc_at = epoch_num
+                latent_acc = label_funcs.accuracy(new_pred_labels,self.dset.y)
+                best_gt_acc = new_best_gt_acc
+                best_non_gt_acc = new_best_non_gt_acc
+            if not ARGS.suppress_prints:
                 print('Counts:',counts)
                 print('MLP Counts:',mlp_counts)
-            acc = label_funcs.accuracy(new_pred_labels,self.dset.y)
-            summary_file_path = os.path.join(exp_dir,'summary.txt')
-            misc.check_dir(exp_dir)
-            with open(summary_file_path,'w') as f:
-                f.write(str(ARGS))
-                f.write(f'Acc: {acc}')
-                print('Latent accuracy:', acc)
-            prev_weighted_probs = weighted_probs
+                print('Latent accuracy:', latent_acc)
+            if ARGS.test: continue
+        misc.check_dir(exp_dir)
+        summary_file_path = os.path.join(exp_dir,'summary.txt')
+        print(f'Best GT Acc: {best_gt_acc}')
+        print(f'Best Non-gt Acc: {best_non_gt_acc}')
+        print(f'Peak Acc: {peak_acc_at}')
+        with open(summary_file_path,'w') as f:
+            f.write(f'Non-gt Acc: {best_non_gt_acc}\n')
+            f.write(f'GT Acc: {best_gt_acc}\n')
+            f.write(f'Latent Acc: {latent_acc}\n')
+            f.write(str(ARGS))
         # Save models
         if ARGS.save:
             misc.torch_save({'enc':self.enc,'dec':self.dec,'mlp':self.mlp},exp_dir,f'har_learner{ARGS.exp_name}.pt')
@@ -326,13 +362,105 @@ class HARLearner():
             misc.np_save(new_pred_labels,exp_dir,f'preds{ARGS.exp_name}.npy')
             with open(os.path.join(exp_dir,f'HMM{ARGS.exp_name}.pkl'), 'wb') as f: pickle.dump(model,f)
 
+    def train_meta_loop_simple(self,num_pre_epochs,num_epochs,num_pseudo_label_epochs,selected_acts,frac_gt_labels,exp_dir):
+        writer = SummaryWriter()
+        self.rec_train(num_pre_epochs)
+        best_gt_acc = 0
+        best_non_gt_acc = 0
+        best_mlp_acc = 0
+        peak_acc_at = 0
+        dl = data.DataLoader(self.dset,batch_sampler=data.BatchSampler(data.RandomSampler(self.dset),self.batch_size,drop_last=False),pin_memory=False)
+        if frac_gt_labels == 0:
+            gt_idx = np.array([], dtype=np.int)
+        elif frac_gt_labels <= 0.5:
+            gt_idx = np.arange(len(self.dset), step=int(1/frac_gt_labels))
+        else:
+            non_gt_idx = np.arange(len(self.dset), step=int(1/(1-frac_gt_labels)))
+            gt_idx = np.delete(np.arange(len(self.dset)),non_gt_idx)
+        gt_mask = np.zeros(len(self.dset))
+        gt_mask[gt_idx] = 1
+        assert abs(len(gt_idx)/len(self.dset) - frac_gt_labels) < .01
+        for epoch in range(num_epochs):
+            epoch_loss = 0
+            epoch_rec_losses = []
+            epoch_pseudo_label_losses = []
+            epoch_losses = []
+            total_pred_list = []
+            total_gt_list = []
+            total_idx_list = []
+            best_loss = np.inf
+            for batch_idx, (xb,yb,idx) in enumerate(dl):
+               latent = self.enc(xb)
+               latent = tensor_funcs.noiseify(latent,ARGS.noise)
+               batch_mask = gt_mask[idx]
+               label_pred = self.mlp(latent[batch_mask]) if latent.ndim == 2 else self.mlp(latent[:,:,0,0][batch_mask])
+               label_loss = self.pseudo_label_lf(label_pred,yb.long()[batch_mask])
+               rec_pred = self.dec(latent)
+               rec_loss = self.rec_lf(rec_pred,xb)
+               loss = label_loss.mean() + rec_loss
+               if math.isnan(loss): set_trace()
+               loss.backward()
+               self.enc_opt.step(); self.enc_opt.zero_grad()
+               self.dec_opt.step(); self.dec_opt.zero_grad()
+               self.mlp_opt.step(); self.mlp_opt.zero_grad()
+               total_pred_list.append(label_pred.argmax(axis=1).detach().cpu().numpy())
+               total_gt_list.append(yb.detach().cpu().numpy())
+               total_idx_list.append(idx.detach().cpu().numpy())
+               epoch_pseudo_label_losses.append(loss.item())
+               epoch_losses.append(loss)
+               if ARGS.test: break
+            total_pred_array = np.concatenate(total_pred_list)
+            total_idx_array = np.concatenate(total_idx_list)
+            total_gt_array = self.dset.y.detach().cpu().numpy()[total_idx_array]
+            total_pred_array_ordered = np.array([item[0] for item in sorted(zip(total_pred_array,total_idx_array),key=lambda x:x[1])])
+            if ARGS.test: break
+            non_gt_acc2 = label_funcs.accuracy(np.delete(total_pred_array,gt_idx),np.delete(total_gt_array,gt_idx))
+            non_gt_acc = label_funcs.accuracy(np.delete(total_pred_array_ordered,gt_idx),np.delete(self.dset.y.detach().cpu().numpy(),gt_idx))
+            non_gt_f1 = mean_f1(np.delete(total_pred_array_ordered,gt_idx),np.delete(self.dset.y.detach().cpu().numpy(),gt_idx))
+            gt_acc = -1 if len(gt_idx) == 0 else label_funcs.accuracy(total_pred_array_ordered[gt_idx],self.dset.y.detach().cpu().numpy()[gt_idx])
+            gt_mean_f1 = -1 if len(gt_idx) == 0 else mean_f1(total_pred_array_ordered[gt_idx],self.dset.y.detach().cpu().numpy()[gt_idx])
+            full_acc = label_funcs.accuracy(total_pred_array,total_gt_array)
+            full_acc2 = label_funcs.accuracy(total_pred_array_ordered,self.dset.y.detach().cpu().numpy())
+            assert full_acc==full_acc2
+            if not ARGS.suppress_prints:
+               print(f'MLP non-gt acc: {non_gt_acc} {non_gt_acc2}')
+               print(f'MLP gt acc: {gt_acc}')
+               print(f'MLP non-gt mean_f1: {non_gt_f1}')
+               print(f'MLP gt mean_f1: {gt_mean_f1}')
+            if ARGS.test or len(gt_idx) == 0 or gt_acc > best_gt_acc:
+               best_gt_acc=gt_acc
+               best_non_gt_acc=non_gt_acc
+               best_non_gt_f1=non_gt_f1
+               misc.torch_save({'enc':self.enc,'dec':self.dec,'mlp':self.mlp},exp_dir,'best_model.pt')
+            if epoch_loss < best_loss:
+               best_loss = epoch_loss
+               count = 0
+            else:
+               count += 1
+            if count > 4: break
+            mlp_counts = {selected_acts[item]:sum(total_pred_array_ordered==item) for item in set(total_pred_array_ordered)}
+            if ARGS.test: continue
+        misc.check_dir(exp_dir)
+        summary_file_path = os.path.join(exp_dir,'summary.txt')
+        print(f'Best GT Acc: {best_gt_acc}')
+        print(f'Best Non-gt Acc: {best_non_gt_acc}')
+        print(f'Peak Acc: {peak_acc_at}')
+        with open(summary_file_path,'w') as f:
+            f.write(f'Non-gt Acc: {best_non_gt_acc}\n')
+            f.write(f'GT Acc: {best_gt_acc}\n')
+            f.write(str(ARGS))
+        # Save models
+        if ARGS.save:
+            misc.torch_save({'enc':self.enc,'dec':self.dec,'mlp':self.mlp},exp_dir,f'har_learner{ARGS.exp_name}.pt')
+            misc.np_save(total_pred_array_ordered,exp_dir,f'preds{ARGS.exp_name}.npy')
+
 
 def make_wisdm_v1_dset(args,subj_ids):
     activities_list = ['Jogging','Walking','Upstairs','Downstairs','Standing','Sitting']
     action_name_dict = dict(zip(range(len(activities_list)),activities_list))
-    x = np.load('wisdm_v1/X.npy')
-    y = np.load('wisdm_v1/y.npy')
-    users = np.load('wisdm_v1/users.npy')
+    x = np.load('datasets/wisdm_v1/X.npy')
+    y = np.load('datasets/wisdm_v1/y.npy')
+    users = np.load('datasets/wisdm_v1/users.npy')
     idxs_to_user = np.zeros(users.shape[0]).astype(np.bool)
     for subj_id in subj_ids:
         new_users = users==subj_id
@@ -354,12 +482,12 @@ def make_wisdm_v1_dset(args,subj_ids):
     return dset, selected_acts
 
 def make_wisdm_watch_dset(args,subj_ids):
-    with open('wisdm-dataset/activity_key.txt') as f: r=f.readlines()
+    with open('datasets/wisdm-dataset/activity_key.txt') as f: r=f.readlines()
     activities_list = [x.split(' = ')[0] for x in r if ' = ' in x]
     action_name_dict = dict(zip(range(len(activities_list)),activities_list))
-    x = np.concatenate([np.load(f'wisdm-dataset/np_data/{s}.npy') for s in subj_ids])
-    y = np.concatenate([np.load(f'wisdm-dataset/np_data/{s}_labels.npy') for s in subj_ids])
-    certains = np.concatenate([np.load(f'wisdm-dataset/np_data/{s}_certains.npy') for s in subj_ids])
+    x = np.concatenate([np.load(f'datasets/wisdm-dataset/np_data/{s}.npy') for s in subj_ids])
+    y = np.concatenate([np.load(f'datasets/wisdm-dataset/np_data/{s}_labels.npy') for s in subj_ids])
+    certains = np.concatenate([np.load(f'datasets/wisdm-dataset/np_data/{s}_certains.npy') for s in subj_ids])
     x = x[certains]
     y = y[certains]
     xnans = np.isnan(x).any(axis=1)
@@ -388,8 +516,8 @@ def make_uci_dset(args,subj_ids):
         y = torch.tensor(y,device='cuda').float() - 1 #To begin at 0 rather than 1
         dset = Preprocced_Dataset(x,y,device='cuda')
     elif args.dset == 'UCI-raw':
-        x = np.concatenate([np.load(f'UCI2/np_data/user{subj_id}.npy') for subj_id in subj_ids])
-        y = np.concatenate([np.load(f'UCI2/np_data/user{subj_id}_labels.npy') for subj_id in subj_ids])
+        x = np.concatenate([np.load(f'datasets/UCI2/np_data/user{subj_id}.npy') for subj_id in subj_ids])
+        y = np.concatenate([np.load(f'datasets/UCI2/np_data/user{subj_id}_labels.npy') for subj_id in subj_ids])
         xnans = np.isnan(x).any(axis=1)
         x = x[~xnans]
         y = y[~xnans]
@@ -410,8 +538,8 @@ def make_uci_dset(args,subj_ids):
 
 def make_pamap_dset(args,subj_ids):
     action_name_dict = {1:'lying',2:'sitting',3:'standing',4:'walking',5:'running',6:'cycling',7:'Nordic walking',9:'watching TV',10:'computer work',11:'car driving',12:'ascending stairs',13:'descending stairs',16:'vacuum cleaning',17:'ironing',18:'folding laundry',19:'house cleaning',20:'playing soccer',24:'rope jumping'}
-    x = np.concatenate([np.load(f'PAMAP2_Dataset/np_data/subject{subj_id}.npy') for subj_id in subj_ids])
-    y = np.concatenate([np.load(f'PAMAP2_Dataset/np_data/subject{subj_id}_labels.npy') for subj_id in subj_ids])
+    x = np.concatenate([np.load(f'datasets/PAMAP2_Dataset/np_data/subject{subj_id}.npy') for subj_id in subj_ids])
+    y = np.concatenate([np.load(f'datasets/PAMAP2_Dataset/np_data/subject{subj_id}_labels.npy') for subj_id in subj_ids])
     x = x[y!=0]
     y = y[y!=0]
     xnans = np.isnan(x).any(axis=1)
@@ -429,6 +557,7 @@ def make_pamap_dset(args,subj_ids):
     return dset, selected_acts
 
 def train(args,subj_ids):
+    prep_start_time = time.time()
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
     if args.dset=='PAMAP': dset, selected_acts = make_pamap_dset(args,subj_ids)
     elif args.dset in ['UCI-pre','UCI-raw']: dset, selected_acts = make_uci_dset(args,subj_ids)
@@ -533,7 +662,38 @@ def train(args,subj_ids):
     har = HARLearner(enc=enc,dec=dec,mlp=mlp,dset=dset,device='cuda',batch_size=args.batch_size,num_classes=num_labels)
     exp_dir = os.path.join(f'experiments/{args.exp_name}')
 
-    har.train_meta_loop(num_pre_epochs=args.num_pre_epochs, num_meta_epochs=args.num_meta_epochs, num_pseudo_label_epochs=args.num_pseudo_label_epochs, prob_thresh=args.prob_thresh, frac_gt_labels=args.frac_gt_labels, selected_acts=selected_acts, exp_dir=exp_dir)
+    train_start_time = time.time()
+    if args.simple:
+        har.train_meta_loop_simple(num_pre_epochs=args.num_pre_epochs, num_epochs=args.num_meta_epochs, num_pseudo_label_epochs=args.num_pseudo_label_epochs, selected_acts=selected_acts, frac_gt_labels=args.frac_gt_labels, exp_dir=exp_dir)
+    else:
+        har.train_meta_loop(num_pre_epochs=args.num_pre_epochs, num_meta_epochs=args.num_meta_epochs, num_pseudo_label_epochs=args.num_pseudo_label_epochs, prob_thresh=args.prob_thresh, frac_gt_labels=args.frac_gt_labels, selected_acts=selected_acts, exp_dir=exp_dir)
+    train_end_time = time.time()
+    total_prep_time = misc.asMinutes(train_start_time-prep_start_time)
+    total_train_time = misc.asMinutes(train_end_time-train_start_time)
+    print(f"Prep time: {total_prep_time}\n Train time: {total_train_time}")
+
+
+def f1(bin_classifs_pred,bin_classifs_gt):
+    tp = sum(bin_classifs_pred*bin_classifs_gt)
+    if tp==0: return 0
+    fp = sum(bin_classifs_pred*~bin_classifs_gt)
+    fn = sum(~bin_classifs_pred*bin_classifs_gt)
+
+    prec = tp/(tp+fp)
+    rec = tp/(tp+fn)
+    return (2*prec*rec)/(prec+rec)
+
+
+def mean_f1(labels1,labels2):
+    subsample_size = min(len(labels1),30000)
+    trans_labels = label_funcs.translate_labellings(labels1,labels2,subsample_size)
+    #assert label_funcs.unique_labels(trans_labels) == label_funcs.unique_labels(labels2)
+    lab_f1s = []
+    for lab in label_funcs.unique_labels(trans_labels):
+        lab_booleans1 = trans_labels==lab
+        lab_booleans2 = labels2==lab
+        lab_f1s.append(f1(lab_booleans1,lab_booleans2))
+    return sum(lab_f1s)/len(lab_f1s)
 
 if __name__ == "__main__":
 
@@ -560,8 +720,9 @@ if __name__ == "__main__":
     parser.add_argument('--prob_thresh',type=float,default=.95)
     parser.add_argument('--save','-s',action='store_true')
     parser.add_argument('--step_size',type=int,default=5)
+    parser.add_argument('--simple',action='store_true')
     parser.add_argument('--subj_ids',type=str,nargs='+',default=['first'])
-    parser.add_argument('--show_counts',action='store_true')
+    parser.add_argument('--suppress_prints',action='store_true')
     parser.add_argument('--test','-t',action='store_true')
     parser.add_argument('--umap_abl',action='store_true')
     parser.add_argument('--verbose',action='store_true')
@@ -580,17 +741,18 @@ if __name__ == "__main__":
     elif ARGS.dset == 'WISDM-watch':
         all_possible_ids = [str(x) for x in range(1600,1651)]
     elif ARGS.dset == 'WISDM-v1':
-        all_possible_ids = [str(x) for x in range(1,30)]
-    if ARGS.subj_ids == ['first']: ARGS.subj_ids = all_possible_ids[:1]
-    if ARGS.all_subjs: ARGS.subj_ids=all_possible_ids
-    bad_ids = [x for x in ARGS.subj_ids if x not in all_possible_ids]
+        all_possible_ids = [str(x) for x in range(1,37)] #Paper says 29 users but ids go up to 36
+    if ARGS.subj_ids == ['first']: subj_ids = all_possible_ids[:1]
+    elif ARGS.all_subjs: subj_ids=all_possible_ids
+    else: subj_ids = ARGS.subj_ids
+    bad_ids = [x for x in subj_ids if x not in all_possible_ids]
     if len(bad_ids) > 0:
         print(f"You have specified non-existent ids: {bad_ids}"); sys.exit()
     if ARGS.parallel:
-        train(ARGS,subj_ids=ARGS.subj_ids)
+        train(ARGS,subj_ids=subj_ids)
     else:
         orig_name = ARGS.exp_name
-        for subj_id in ARGS.subj_ids:
+        for subj_id in subj_ids:
             print(f"Training and predicting on id {subj_id}")
             ARGS.exp_name = f"{orig_name}{subj_id}"
             train(ARGS,subj_ids=[subj_id])
