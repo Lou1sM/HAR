@@ -108,7 +108,7 @@ if __name__ == "__main__":
             phone_gyro_path = os.path.join(p_dir,'gyro',f'data_{user_idx}_gyro_phone.txt')
             watch_gyro_path = os.path.join(w_dir,'gyro',f'data_{user_idx}_gyro_watch.txt')
 
-            label_codes_list = list('ABCDEFGHIJKLMOPQRS')
+            label_codes_list = list('ABCDEFGHIJKLMOPQRS') # Missin 'N' is deliberate
             def two_arrays_from_txt(inpath):
                 with open(inpath) as f:
                     d = f.readlines()
@@ -129,6 +129,7 @@ if __name__ == "__main__":
             print(total_user_array.shape)
             mode_object = stats.mode(np.stack(equalized_label_arrays,axis=1),axis=1)
             mode_labels = mode_object.mode[:,0]
+            # Print how many windows contained just 1 label, how many 2 etc.
             print('Agreement in labels:',label_funcs.label_counts(mode_object.count[:,0]))
             certains = (mode_object.count == 4)[:,0]
             user_fn = f'{user_idx}.npy'
@@ -144,8 +145,10 @@ if __name__ == "__main__":
         X_list = []
         y_list = []
         users_list = []
+        num_zeros = 0
         def process_line(line_to_process):
-            if float(line_to_process.split(',')[2]) == 0: print("Timestamp zero, discarding")
+            global num_zeros
+            if float(line_to_process.split(',')[2]) == 0: num_zeros += 1#print("Timestamp zero, discarding")
             else:
                 X_list.append([float(x) for x in line_to_process.split(',')[3:]])
                 y_list.append(activities_list.index(line_to_process.split(',')[1]))
@@ -159,7 +162,7 @@ if __name__ == "__main__":
             else: set_trace()
             if len(line.split(',')) == 6:
                 try: process_line(line)
-                except: print("Can't process line {i}, even though length 6: {raw_line}\n")
+                except: print(f"Can't process line {i}, even though length 6: {raw_line}\n")
             else:
                 print(f"Bad format at line {i}:\n{raw_line}")
                 try:
@@ -173,6 +176,7 @@ if __name__ == "__main__":
         print(one_big_X_array.shape)
         print(one_big_y_array.shape)
         print(one_big_users_array.shape)
+        print(f"Number of zero lines: {num_zeros}")
         misc.np_save(one_big_X_array,'wisdm_v1','X.npy')
         misc.np_save(one_big_y_array,'wisdm_v1','y.npy')
         misc.np_save(one_big_users_array,'wisdm_v1','users.npy')
