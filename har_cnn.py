@@ -75,6 +75,7 @@ class EncByLayer(nn.Module):
         self.conv_layers = nn.ModuleList(conv_layers)
 
     def forward(self,x):
+        if self.verbose: print(x.shape)
         for conv_layer in self.conv_layers:
             x = conv_layer(x)
             if self.verbose: print(x.shape)
@@ -363,12 +364,9 @@ class HARLearner():
             with open(os.path.join(exp_dir,f'HMM{ARGS.exp_name}.pkl'), 'wb') as f: pickle.dump(model,f)
 
     def train_meta_loop_simple(self,num_pre_epochs,num_epochs,num_pseudo_label_epochs,selected_acts,frac_gt_labels,exp_dir):
-        writer = SummaryWriter()
-        self.rec_train(num_pre_epochs)
         best_gt_acc = 0
         best_non_gt_acc = 0
-        best_mlp_acc = 0
-        peak_acc_at = 0
+        best_non_gt_f1 = 0
         dl = data.DataLoader(self.dset,batch_sampler=data.BatchSampler(data.RandomSampler(self.dset),self.batch_size,drop_last=False),pin_memory=False)
         if frac_gt_labels == 0:
             gt_idx = np.array([], dtype=np.int)
@@ -377,14 +375,13 @@ class HARLearner():
         else:
             non_gt_idx = np.arange(len(self.dset), step=int(1/(1-frac_gt_labels)))
             gt_idx = np.delete(np.arange(len(self.dset)),non_gt_idx)
-        gt_mask = np.zeros(len(self.dset))
+        gt_mask = torch.zeros_like(self.dset.y)
         gt_mask[gt_idx] = 1
         assert abs(len(gt_idx)/len(self.dset) - frac_gt_labels) < .01
         self.enc.train()
         self.mlp.train()
         for epoch in range(num_epochs):
             epoch_loss = 0
-            epoch_rec_losses = []
             epoch_pseudo_label_losses = []
             epoch_losses = []
             total_pred_list = []
@@ -393,17 +390,13 @@ class HARLearner():
             best_loss = np.inf
             for batch_idx, (xb,yb,idx) in enumerate(dl):
                latent = self.enc(xb)
-               latent = tensor_funcs.noiseify(latent,ARGS.noise)
                batch_mask = gt_mask[idx]
                label_pred = self.mlp(latent) if latent.ndim == 2 else self.mlp(latent[:,:,0,0])
                label_loss = self.pseudo_label_lf(label_pred,yb.long())
-               rec_pred = self.dec(latent)
-               rec_loss = self.rec_lf(rec_pred,xb)
-               loss = label_loss[batch_mask].mean() + rec_loss
+               loss = (label_loss*batch_mask).mean()
                if math.isnan(loss): set_trace()
                loss.backward()
                self.enc_opt.step(); self.enc_opt.zero_grad()
-               self.dec_opt.step(); self.dec_opt.zero_grad()
                self.mlp_opt.step(); self.mlp_opt.zero_grad()
                total_pred_list.append(label_pred.argmax(axis=1).detach().cpu().numpy())
                total_gt_list.append(yb.detach().cpu().numpy())
@@ -440,13 +433,12 @@ class HARLearner():
             else:
                count += 1
             if count > 4: break
-            mlp_counts = {selected_acts[item]:sum(total_pred_array_ordered==item) for item in set(total_pred_array_ordered)}
             if ARGS.test: continue
         misc.check_dir(exp_dir)
         summary_file_path = os.path.join(exp_dir,'summary.txt')
         print(f'Best GT Acc: {best_gt_acc}')
         print(f'Best Non-gt Acc: {best_non_gt_acc}')
-        print(f'Peak Acc: {peak_acc_at}')
+        print(f'Best Non-gt f1: {best_non_gt_f1}')
         with open(summary_file_path,'w') as f:
             f.write(f'Non-gt Acc: {best_non_gt_acc}\n')
             f.write(f'GT Acc: {best_gt_acc}\n')
@@ -672,7 +664,7 @@ def train(args,subj_ids):
     train_end_time = time.time()
     total_prep_time = misc.asMinutes(train_start_time-prep_start_time)
     total_train_time = misc.asMinutes(train_end_time-train_start_time)
-    print(f"Prep time: {total_prep_time}\n Train time: {total_train_time}")
+    print(f"Prep time: {total_prep_time}\tTrain time: {total_train_time}")
 
 
 def f1(bin_classifs_pred,bin_classifs_gt):
