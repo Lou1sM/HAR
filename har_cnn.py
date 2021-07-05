@@ -12,10 +12,6 @@ from torch.utils import data
 from dl_utils import misc, label_funcs
 
 
-def display(latents_to_display):
-    umapped_latents = umap.UMAP(min_dist=0,n_neighbors=30,n_components=2,random_state=42).fit_transform(latents_to_display.squeeze())
-    misc.scatter_clusters(umapped_latents,labels=None,show=True)
-
 class StepDataset(data.Dataset):
     def __init__(self,x,y,device,window_size,step_size,transforms=[]):
         self.device=device
@@ -63,30 +59,6 @@ class EncByLayer(nn.Module):
             if self.verbose: print(x.shape)
         return x
 
-class Dense_Net(nn.Module):
-    def __init__(self,*sizes):
-        super(Dense_Net,self).__init__()
-        self.net= nn.Sequential(
-            *[nn.Sequential(*[nn.Linear(sizes[i-1],sizes[i]),nn.BatchNorm1d(sizes[i]),nn.LeakyReLU(sizes[i])]) for i in range(1,len(sizes)-1)], nn.Linear(sizes[-2],sizes[-1]))
-        #self.fc1 = nn.Linear(input_size,hidden_size1)
-        #self.bn1 = nn.BatchNorm1d(hidden_size1)
-        #self.act1 = nn.LeakyReLU(0.3)
-        #self.fc2 = nn.Linear(hidden_size1,hidden_size2)
-        #self.bn2 = nn.BatchNorm1d(hidden_size2)
-        #self.act2 = nn.LeakyReLU(0.3)
-        #self.fc3 = nn.Linear(hidden_size2,output_size)
-
-    def forward(self,x):
-        x = self.net(x)
-        #x = self.fc1(x)
-        #x = self.bn1(x)
-        #x = self.act1(x)
-        #x = self.fc2(x)
-        #x = self.bn2(x)
-        #x = self.act2(x)
-        #x = self.fc3(x)
-        return x
-
 class Var_BS_MLP(nn.Module):
     def __init__(self,input_size,hidden_size,output_size):
         super(Var_BS_MLP,self).__init__()
@@ -132,7 +104,7 @@ class HARLearner():
         collected_latents = np.concatenate(collected_latents,axis=0)
         return collected_latents
 
-    def train_meta_loop(self,num_pre_epochs,num_epochs,num_pseudo_label_epochs,selected_acts,frac_gt_labels,exp_dir):
+    def train(self,num_epochs,frac_gt_labels,selected_acts,exp_dir):
         best_gt_acc = 0
         best_non_gt_acc = 0
         best_non_gt_f1 = 0
@@ -314,7 +286,6 @@ def train(args,subj_ids):
     elif args.dset == 'WISDM-watch': dset, selected_acts = make_wisdm_watch_dset(args,subj_ids)
     elif args.dset == 'WISDM-v1': dset, selected_acts = make_wisdm_v1_dset(args,subj_ids)
     num_labels = label_funcs.get_num_labels(dset.y)
-    mlp = Var_BS_MLP(32,25,num_labels)
     if args.dset == 'PAMAP':
         x_filters = (4,4,3,3)
         y_filters = (5,3,2,1)
@@ -340,6 +311,7 @@ def train(args,subj_ids):
         y_strides = (1,1,1,1)
         max_pools = ((2,1),(3,1),(2,1),1)
     enc = EncByLayer(x_filters,y_filters,x_strides,y_strides,max_pools,verbose=args.verbose)
+    mlp = Var_BS_MLP(32,25,num_labels)
     if args.load_pretrained:
         enc.load_state_dict(torch.load('enc_pretrained.pt'))
         mlp.load_state_dict(torch.load('dec_pretrained.pt'))
@@ -350,7 +322,7 @@ def train(args,subj_ids):
     exp_dir = os.path.join(f'experiments/{args.exp_name}')
 
     train_start_time = time.time()
-    har.train_meta_loop(num_pre_epochs=args.num_pre_epochs, num_epochs=args.num_meta_epochs, num_pseudo_label_epochs=args.num_pseudo_label_epochs, selected_acts=selected_acts, frac_gt_labels=args.frac_gt_labels, exp_dir=exp_dir)
+    har.train(args.num_epochs,args.frac_gt_labels,selected_acts=selected_acts,exp_dir=exp_dir)
 
     train_end_time = time.time()
     total_prep_time = misc.asMinutes(train_start_time-prep_start_time)
@@ -367,7 +339,6 @@ def f1(bin_classifs_pred,bin_classifs_gt):
     prec = tp/(tp+fp)
     rec = tp/(tp+fn)
     return (2*prec*rec)/(prec+rec)
-
 
 def mean_f1(labels1,labels2):
     subsample_size = min(len(labels1),30000)
@@ -387,7 +358,6 @@ if __name__ == "__main__":
     parser.add_argument('--all_subjs',action='store_true')
     parser.add_argument('--alpha',type=float,default=.5)
     parser.add_argument('--batch_size',type=int,default=128)
-    parser.add_argument('--dec_lr',type=float,default=1e-3)
     parser.add_argument('--dset',type=str,default='PAMAP',choices=dset_options)
     parser.add_argument('--enc_lr',type=float,default=1e-3)
     parser.add_argument('--exp_name',type=str,default="jim")
@@ -395,21 +365,13 @@ if __name__ == "__main__":
     parser.add_argument('--gpu',type=str,default='0')
     parser.add_argument('--load_pretrained',action='store_true')
     parser.add_argument('--mlp_lr',type=float,default=1e-3)
-    parser.add_argument('--noise',type=float,default=1.)
-    parser.add_argument('--num_meta_epochs',type=int,default=30)
-    parser.add_argument('--num_pre_epochs',type=int,default=5)
-    parser.add_argument('--num_pseudo_label_epochs',type=int,default=5)
+    parser.add_argument('--num_epochs',type=int,default=30)
     parser.add_argument('--parallel',action='store_true')
-    parser.add_argument('--probs_abl1',action='store_true')
-    parser.add_argument('--probs_abl2',action='store_true')
-    parser.add_argument('--prob_thresh',type=float,default=.95)
     parser.add_argument('--save','-s',action='store_true')
     parser.add_argument('--step_size',type=int,default=5)
-    parser.add_argument('--simple',action='store_true')
     parser.add_argument('--subj_ids',type=str,nargs='+',default=['first'])
     parser.add_argument('--suppress_prints',action='store_true')
     parser.add_argument('--test','-t',action='store_true')
-    parser.add_argument('--umap_abl',action='store_true')
     parser.add_argument('--verbose',action='store_true')
     parser.add_argument('--window_size',type=int,default=512)
     ARGS = parser.parse_args()
