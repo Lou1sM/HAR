@@ -16,17 +16,6 @@ def display(latents_to_display):
     umapped_latents = umap.UMAP(min_dist=0,n_neighbors=30,n_components=2,random_state=42).fit_transform(latents_to_display.squeeze())
     misc.scatter_clusters(umapped_latents,labels=None,show=True)
 
-class Preprocced_Dataset(data.Dataset):
-    def __init__(self,x,y,device):
-        self.device=device
-        self.x, self.y = x,y
-        self.x, self.y = self.x.to(self.device),self.y.to(self.device)
-    def __len__(self): return len(self.x)
-    def __getitem__(self,idx):
-        batch_x = self.x[idx]
-        batch_y = self.y[idx]
-        return batch_x, batch_y, idx
-
 class StepDataset(data.Dataset):
     def __init__(self,x,y,device,window_size,step_size,transforms=[]):
         self.device=device
@@ -276,16 +265,7 @@ def make_wisdm_watch_dset(args,subj_ids):
 
 def make_uci_dset(args,subj_ids):
     action_name_dict = {1:'walking',2:'walking upstairs',3:'walking downstairs',4:'sitting',5:'standing',6:'lying',7:'stand_to_sit',9:'sit_to_stand',10:'sit_to_lit',11:'lie_to_sit',12:'stand_to_lie',13:'lie_to_stand'}
-    if args.dset == 'UCI-pre':
-        selected_acts = list(action_name_dict.values())
-        x = np.load('UCI2/X_train.npy')
-        y = np.load('UCI2/y_train.npy')
-        x = x[y!=-1]
-        y = y[y!=-1]
-        x = torch.tensor(x,device='cuda').float()
-        y = torch.tensor(y,device='cuda').float() - 1 #To begin at 0 rather than 1
-        dset = Preprocced_Dataset(x,y,device='cuda')
-    elif args.dset == 'UCI-raw':
+    if args.dset == 'UCI-raw':
         x = np.concatenate([np.load(f'datasets/UCI2/np_data/user{subj_id}.npy') for subj_id in subj_ids])
         y = np.concatenate([np.load(f'datasets/UCI2/np_data/user{subj_id}_labels.npy') for subj_id in subj_ids])
         xnans = np.isnan(x).any(axis=1)
