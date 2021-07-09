@@ -3,38 +3,14 @@ import os
 import argparse
 import math
 from pdb import set_trace
-from scipy import stats
 import torch
 import torch.nn as nn
 import numpy as np
 import time
 from torch.utils import data
 from dl_utils import misc, label_funcs
+from make_dsets import make_dset_train_val
 
-
-class StepDataset(data.Dataset):
-    def __init__(self,x,y,device,window_size,step_size,transforms=[]):
-        self.device=device
-        self.x, self.y = x,y
-        self.window_size = window_size
-        self.step_size = step_size
-        for transform in transforms:
-            self.x = transform(self.x)
-        self.x, self.y = self.x.to(self.device),self.y.to(self.device)
-    def __len__(self): return (len(self.x)-self.window_size)//self.step_size + 1
-    def __getitem__(self,idx):
-        batch_x = self.x[idx*self.step_size:(idx*self.step_size) + self.window_size].unsqueeze(0)
-        batch_y = self.y[idx]
-        return batch_x, batch_y, idx
-
-    def temporal_consistency_loss(self,sequence):
-        total_loss = 0
-        for start_idx in range(len(sequence)-self.window_size):
-            window = sequence[start_idx:start_idx+self.window_size]
-            mu = window.mean(axis=0)
-            window_var = sum([(item-mu) for item in self.window])/self.window_size
-            if window_var < self.split_thresh: total_loss += window_var
-        return total_loss
 
 class EncByLayer(nn.Module):
     def __init__(self,x_filters,y_filters,x_strides,y_strides,max_pools,verbose):
@@ -78,9 +54,7 @@ class Var_BS_MLP(nn.Module):
         return x
 
 class HARLearner():
-    def __init__(self,dset_train,dset_val,enc,mlp,batch_size,num_classes):
-        self.dset_train = dset_train
-        self.dset_val = dset_val
+    def __init__(self,enc,mlp,batch_size,num_classes):
         self.batch_size = batch_size
         self.num_classes = num_classes
         self.enc = enc
@@ -104,22 +78,22 @@ class HARLearner():
         collected_latents = np.concatenate(collected_latents,axis=0)
         return collected_latents
 
-    def train(self,num_epochs,frac_gt_labels,selected_acts,exp_dir):
+    def train(self,dset_train,dset_val,num_epochs,frac_gt_labels,selected_acts,exp_dir):
         best_gt_acc = 0
         best_non_gt_acc = 0
         best_non_gt_f1 = 0
-        dl_train = data.DataLoader(self.dset_train,batch_sampler=data.BatchSampler(data.RandomSampler(self.dset_train),self.batch_size,drop_last=False),pin_memory=False)
-        dl_val = data.DataLoader(self.dset_val,batch_sampler=data.BatchSampler(data.RandomSampler(self.dset_val),self.batch_size,drop_last=False),pin_memory=False)
+        dl_train = data.DataLoader(dset_train,batch_sampler=data.BatchSampler(data.RandomSampler(dset_train),self.batch_size,drop_last=False),pin_memory=False)
+        dl_val = data.DataLoader(dset_val,batch_sampler=data.BatchSampler(data.RandomSampler(dset_val),self.batch_size,drop_last=False),pin_memory=False)
         if frac_gt_labels == 0:
             gt_idx = np.array([], dtype=np.int)
         elif frac_gt_labels <= 0.5:
-            gt_idx = np.arange(len(self.dset_train), step=int(1/frac_gt_labels))
+            gt_idx = np.arange(len(dset_train), step=int(1/frac_gt_labels))
         else:
-            non_gt_idx = np.arange(len(self.dset_train), step=int(1/(1-frac_gt_labels)))
-            gt_idx = np.delete(np.arange(len(self.dset_train)),non_gt_idx)
-        gt_mask = torch.zeros_like(self.dset_train.y)
+            non_gt_idx = np.arange(len(dset_train), step=int(1/(1-frac_gt_labels)))
+            gt_idx = np.delete(np.arange(len(dset_train)),non_gt_idx)
+        gt_mask = torch.zeros_like(dset_train.y)
         gt_mask[gt_idx] = 1
-        assert abs(len(gt_idx)/len(self.dset_train) - frac_gt_labels) < .01
+        assert abs(len(gt_idx)/len(dset_train) - frac_gt_labels) < .01
         for epoch in range(num_epochs):
             epoch_loss = 0
             epoch_pseudo_label_losses = []
@@ -145,15 +119,13 @@ class HARLearner():
                 self.enc_opt.step(); self.enc_opt.zero_grad()
                 self.mlp_opt.step(); self.mlp_opt.zero_grad()
                 train_pred_list.append(label_pred.argmax(axis=1).detach().cpu().numpy())
-                #total_gt_list.append(yb.detach().cpu().numpy())
                 train_idx_list.append(idx.detach().cpu().numpy())
                 if ARGS.test: break
-            #total_gt_array = self.dset_train.y.detach().cpu().numpy()[total_idx_array]
             train_pred_array = np.concatenate(train_pred_list)
             train_idx_array = np.concatenate(train_idx_list)
             train_pred_array_ordered = np.array([item[0] for item in sorted(zip(train_pred_array,train_idx_array),key=lambda x:x[1])])
-            train_acc = -1 if ARGS.test or len(gt_idx) == 0 else label_funcs.accuracy(train_pred_array_ordered,self.dset_train.y.detach().cpu().numpy())
-            train_f1 = -1 if ARGS.test or len(gt_idx) == 0 else label_funcs.mean_f1(train_pred_array_ordered,self.dset_train.y.detach().cpu().numpy())
+            train_acc = -1 if ARGS.test or len(gt_idx) == 0 else label_funcs.accuracy(train_pred_array_ordered,dset_train.y.detach().cpu().numpy())
+            train_f1 = -1 if ARGS.test or len(gt_idx) == 0 else label_funcs.mean_f1(train_pred_array_ordered,dset_train.y.detach().cpu().numpy())
             if ARGS.test or len(gt_idx) == 0 or train_acc > best_train_acc:
                 best_train_acc = train_acc
                 best_train_f1 = train_f1
@@ -172,8 +144,8 @@ class HARLearner():
             val_idx_array = np.concatenate(val_idx_list)
             val_pred_array_ordered = np.array([item[0] for item in sorted(zip(val_pred_array,val_idx_array),key=lambda x:x[1])])
             if ARGS.test: break
-            val_acc = -1 if ARGS.test or len(gt_idx) == 0 else label_funcs.accuracy(val_pred_array_ordered,self.dset_val.y.detach().cpu().numpy())
-            val_f1 = -1 if ARGS.test or len(gt_idx) == 0 else label_funcs.mean_f1(val_pred_array_ordered,self.dset_val.y.detach().cpu().numpy())
+            val_acc = -1 if ARGS.test or len(gt_idx) == 0 else label_funcs.accuracy(val_pred_array_ordered,dset_val.y.detach().cpu().numpy())
+            val_f1 = -1 if ARGS.test or len(gt_idx) == 0 else label_funcs.mean_f1(val_pred_array_ordered,dset_val.y.detach().cpu().numpy())
             if not ARGS.suppress_prints:
                 print(f'MLP gt acc: {val_acc}')
                 print(f'MLP non-gt mean_f1: {val_f1}')
@@ -279,143 +251,37 @@ class HARLearner():
         return results_matrix
 
 
-def preproc_xys(x,y,step_size,window_size,action_name_dict):
-    x = x[y!=0]
-    y = y[y!=0]
-    xnans = np.isnan(x).any(axis=1)
-    x = x[~xnans]
-    y = y[~xnans]
-    x = x[y!=-1]
-    y = y[y!=-1]
-    num_windows = (len(x) - window_size)//step_size + 1
-    mode_labels = np.concatenate([stats.mode(y[w*step_size:w*step_size + window_size]).mode for w in range(num_windows)])
-    selected_ids = set(mode_labels)
-    selected_acts = [action_name_dict[act_id] for act_id in selected_ids]
-    mode_labels, trans_dict, changed = label_funcs.compress_labels(mode_labels)
-    assert len(selected_acts) == len(set(mode_labels))
-    x = torch.tensor(x,device='cuda').float()
-    y = torch.tensor(mode_labels,device='cuda').float()
-    return x, y, selected_acts
-
-def make_wisdm_v1_dset(args,subj_ids):
-    activities_list = ['Jogging','Walking','Upstairs','Downstairs','Standing','Sitting']
-    action_name_dict = dict(zip(range(len(activities_list)),activities_list))
-    x = np.load('datasets/wisdm_v1/X.npy')
-    y = np.load('datasets/wisdm_v1/y.npy')
-    train_ids = subj_ids[:-2]
-    val_ids = subj_ids[-2:]
-    users = np.load('datasets/wisdm_v1/users.npy')
-    train_idxs_to_user = np.zeros(users.shape[0]).astype(np.bool)
-    for subj_id in train_ids:
-        new_users = users==subj_id
-        train_idxs_to_user = np.logical_or(train_idxs_to_user,new_users)
-    val_idxs_to_user = np.zeros(users.shape[0]).astype(np.bool)
-    for subj_id in val_ids:
-        new_users = users==subj_id
-        val_idxs_to_user = np.logical_or(val_idxs_to_user,new_users)
-    x_train = x[train_idxs_to_user]
-    y_train = y[train_idxs_to_user]
-    x_val = x[val_idxs_to_user]
-    y_val = y[val_idxs_to_user]
-    xnans = np.isnan(x).any(axis=1)
-    x = x[~xnans]
-    y = y[~xnans]
-    x_train,y_train,selected_acts = preproc_xys(x_train,y_train,args.step_size,args.window_size,action_name_dict)
-    x_val,y_val,selected_acts = preproc_xys(x_val,y_val,args.step_size,args.window_size,action_name_dict)
-    dset_train = StepDataset(x_train,y_train,device='cuda',window_size=args.window_size,step_size=args.step_size)
-    dset_val = StepDataset(x_val,y_val,device='cuda',window_size=args.window_size,step_size=args.step_size)
-    return dset_train, dset_val, selected_acts
-
-def make_wisdm_watch_dset(args,subj_ids):
-    with open('datasets/wisdm-dataset/activity_key.txt') as f: r=f.readlines()
-    activities_list = [x.split(' = ')[0] for x in r if ' = ' in x]
-    action_name_dict = dict(zip(range(len(activities_list)),activities_list))
-    train_ids = subj_ids[:-2]
-    val_ids = subj_ids[-2:]
-    x_train = np.concatenate([np.load(f'datasets/wisdm-dataset/np_data/{s}.npy') for s in train_ids])
-    y_train = np.concatenate([np.load(f'datasets/wisdm-dataset/np_data/{s}_labels.npy') for s in train_ids])
-    x_val = np.concatenate([np.load(f'datasets/wisdm-dataset/np_data/{s}.npy') for s in val_ids])
-    y_val = np.concatenate([np.load(f'datasets/wisdm-dataset/np_data/{s}_labels.npy') for s in val_ids])
-    certains_train = np.concatenate([np.load(f'datasets/wisdm-dataset/np_data/{s}_certains.npy') for s in train_ids])
-    certains_val = np.concatenate([np.load(f'datasets/wisdm-dataset/np_data/{s}_certains.npy') for s in val_ids])
-    x_train = x_train[certains_train]
-    y_train = y_train[certains_train]
-    x_val = x_val[certains_val]
-    y_val = y_val[certains_val]
-    x_train,y_train,selected_acts = preproc_xys(x_train,y_train,args.step_size,args.window_size,action_name_dict)
-    x_val,y_val,selected_acts = preproc_xys(x_val,y_val,args.step_size,args.window_size,action_name_dict)
-    dset_train = StepDataset(x_train,y_train,device='cuda',window_size=args.window_size,step_size=args.step_size)
-    dset_val = StepDataset(x_val,y_val,device='cuda',window_size=args.window_size,step_size=args.step_size)
-    return dset_train, dset_val, selected_acts
-
-def make_uci_dset(args,subj_ids):
-    action_name_dict = {1:'walking',2:'walking upstairs',3:'walking downstairs',4:'sitting',5:'standing',6:'lying',7:'stand_to_sit',9:'sit_to_stand',10:'sit_to_lit',11:'lie_to_sit',12:'stand_to_lie',13:'lie_to_stand'}
-    train_ids = subj_ids[:-2]
-    val_ids = subj_ids[-2:]
-    x_train = np.concatenate([np.load(f'datasets/UCI2/np_data/user{s}.npy') for s in train_ids])
-    y_train = np.concatenate([np.load(f'datasets/UCI2/np_data/user{s}_labels.npy') for s in train_ids])
-    x_val = np.concatenate([np.load(f'datasets/UCI2/np_data/user{s}.npy') for s in val_ids])
-    y_val = np.concatenate([np.load(f'datasets/UCI2/np_data/user{s}_labels.npy') for s in val_ids])
-    x_train = x_train[y_train<7] # Labels still begin at 1 at this point as
-    y_train = y_train[y_train<7] # haven't been compressed, so select 1,..,6
-    #x_train = x_train[y_train!=-1]
-    #y_train = y_train[y_train!=-1]
-    x_val = x_val[y_val<7] # Labels still begin at 1 at this point as
-    y_val = y_val[y_val<7] # haven't been compressed, so select 1,..,6
-    #x_val = x_val[y_val!=-1]
-    #y_val = y_val[y_val!=-1]
-    x_train,y_train,selected_acts = preproc_xys(x_train,y_train,args.step_size,args.window_size,action_name_dict)
-    x_val,y_val,selected_acts = preproc_xys(x_val,y_val,args.step_size,args.window_size,action_name_dict)
-    dset_train = StepDataset(x_train,y_train,device='cuda',window_size=args.window_size,step_size=args.step_size)
-    dset_val = StepDataset(x_val,y_val,device='cuda',window_size=args.window_size,step_size=args.step_size)
-    return dset_train, dset_val, selected_acts
-
-def make_pamap_dset(args,subj_ids):
-    action_name_dict = {1:'lying',2:'sitting',3:'standing',4:'walking',5:'running',6:'cycling',7:'Nordic walking',9:'watching TV',10:'computer work',11:'car driving',12:'ascending stairs',13:'descending stairs',16:'vacuum cleaning',17:'ironing',18:'folding laundry',19:'house cleaning',20:'playing soccer',24:'rope jumping'}
-    train_ids = subj_ids[:-2]
-    val_ids = subj_ids[-2:]
-    x_train = np.concatenate([np.load(f'datasets/PAMAP2_Dataset/np_data/subject{s}.npy') for s in train_ids])
-    y_train = np.concatenate([np.load(f'datasets/PAMAP2_Dataset/np_data/subject{s}_labels.npy') for s in train_ids])
-    x_val = np.concatenate([np.load(f'datasets/PAMAP2_Dataset/np_data/subject{s}.npy') for s in val_ids])
-    y_val = np.concatenate([np.load(f'datasets/PAMAP2_Dataset/np_data/subject{s}_labels.npy') for s in val_ids])
-    x_train,y_train,selected_acts = preproc_xys(x_train,y_train,args.step_size,args.window_size,action_name_dict)
-    x_val,y_val,selected_acts = preproc_xys(x_val,y_val,args.step_size,args.window_size,action_name_dict)
-    dset_train = StepDataset(x_train,y_train,device='cuda',window_size=args.window_size,step_size=args.step_size)
-    dset_val = StepDataset(x_val,y_val,device='cuda',window_size=args.window_size,step_size=args.step_size)
-    return dset_train, dset_val, selected_acts
-
-def train(args,subj_ids):
+def main(args,subj_ids):
     prep_start_time = time.time()
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
-    if args.dset=='PAMAP': dset_train, dset_val, selected_acts = make_pamap_dset(args,subj_ids)
-    elif args.dset == 'UCI-raw': dset_train, dset_val, selected_acts = make_uci_dset(args,subj_ids)
-    elif args.dset == 'WISDM-watch': dset_train, dset_val, selected_acts = make_wisdm_watch_dset(args,subj_ids)
-    elif args.dset == 'WISDM-v1': dset_train, dset_val, selected_acts = make_wisdm_v1_dset(args,subj_ids)
-    num_labels = label_funcs.get_num_labels(dset_train.y)
     if args.dset == 'PAMAP':
         x_filters = (50,40,3,3)
         y_filters = (5,3,2,1)
         x_strides = (2,2,1,1)
         y_strides = (1,1,1,1)
         max_pools = (2,2,2,2)
-    elif args.dset == 'UCI-raw':
+        num_labels = 12
+    elif args.dset == 'UCI':
         x_filters = (50,40,4,4)
         y_filters = (1,1,3,2)
         x_strides = (2,2,1,1)
         y_strides = (1,1,3,1)
         max_pools = ((2,1),(3,1),(2,1),1)
-    elif args.dset == 'WISDM-watch':
-        x_filters = (50,40,4,4)
-        y_filters = (1,1,3,2)
-        x_strides = (2,2,1,1)
-        y_strides = (1,1,3,1)
-        max_pools = ((2,1),(3,1),(2,1),1)
+        num_labels = 6
     elif args.dset == 'WISDM-v1':
         x_filters = (50,40,4,4)
         y_filters = (1,1,2,2)
         x_strides = (2,2,1,1)
         y_strides = (1,1,1,1)
         max_pools = ((2,1),(3,1),(2,1),1)
+        num_labels = 5
+    elif args.dset == 'WISDM-watch':
+        x_filters = (50,40,4,4)
+        y_filters = (1,1,3,2)
+        x_strides = (2,2,1,1)
+        y_strides = (1,1,3,1)
+        max_pools = ((2,1),(3,1),(2,1),1)
+        num_labels = 17
     enc = EncByLayer(x_filters,y_filters,x_strides,y_strides,max_pools,verbose=args.verbose)
     mlp = Var_BS_MLP(32,25,num_labels)
     if args.load_pretrained:
@@ -424,12 +290,16 @@ def train(args,subj_ids):
     enc.cuda()
     mlp.cuda()
 
-    har = HARLearner(enc=enc,mlp=mlp,dset_train=dset_train,dset_val=dset_val,batch_size=args.batch_size,num_classes=num_labels)
+    har = HARLearner(enc=enc,mlp=mlp,batch_size=args.batch_size,num_classes=num_labels)
     exp_dir = os.path.join(f'experiments/{args.exp_name}')
 
     train_start_time = time.time()
-    har.train(args.num_epochs,args.frac_gt_labels,selected_acts=selected_acts,exp_dir=exp_dir)
-
+    if ARGS.cross_train:
+        dsets_by_id = make_dset_train_val(args,subj_ids)
+        har.cross_train(dsets_by_id,args.num_epochs,args.frac_gt_labels,exp_dir=exp_dir)
+    else:
+        dset_train, dset_val, selected_acts = make_dset_train_val(args,subj_ids)
+        har.train(dset_train,dset_val,args.num_epochs,args.frac_gt_labels,exp_dir=exp_dir,selected_acts=selected_acts)
     train_end_time = time.time()
     total_prep_time = misc.asMinutes(train_start_time-prep_start_time)
     total_train_time = misc.asMinutes(train_end_time-train_start_time)
@@ -438,11 +308,12 @@ def train(args,subj_ids):
 
 if __name__ == "__main__":
 
-    dset_options = ['PAMAP','UCI-raw','WISDM-v1','WISDM-watch']
+    dset_options = ['PAMAP','UCI','WISDM-v1','WISDM-watch']
     parser = argparse.ArgumentParser()
     parser.add_argument('--all_subjs',action='store_true')
     parser.add_argument('--alpha',type=float,default=.5)
     parser.add_argument('--batch_size',type=int,default=128)
+    parser.add_argument('--cross_train',action='store_true')
     parser.add_argument('--dset',type=str,default='PAMAP',choices=dset_options)
     parser.add_argument('--enc_lr',type=float,default=1e-3)
     parser.add_argument('--exp_name',type=str,default="jim")
@@ -464,10 +335,9 @@ if __name__ == "__main__":
     if ARGS.test and ARGS.save:
         print("Shouldn't be saving for a test run"); sys.exit()
     if ARGS.test: ARGS.num_meta_epochs = 2
-    else: import umap
     if ARGS.dset == 'PAMAP':
         all_possible_ids = [str(x) for x in range(101,110)]
-    elif ARGS.dset in ['UCI-pre','UCI-raw']:
+    elif ARGS.dset == 'UCI':
         def two_digitify(x): return '0' + str(x) if len(str(x))==1 else str(x)
         all_possible_ids = [two_digitify(x) for x in range(1,30)]
     elif ARGS.dset == 'WISDM-watch':
@@ -481,10 +351,10 @@ if __name__ == "__main__":
     if len(bad_ids) > 0:
         print(f"You have specified non-existent ids: {bad_ids}"); sys.exit()
     if ARGS.parallel:
-        train(ARGS,subj_ids=subj_ids)
+        main(ARGS,subj_ids=subj_ids)
     else:
         orig_name = ARGS.exp_name
         for subj_id in subj_ids:
             print(f"Training and predicting on id {subj_id}")
             ARGS.exp_name = f"{orig_name}{subj_id}"
-            train(ARGS,subj_ids=[subj_id])
+            main(ARGS,subj_ids=[subj_id])
