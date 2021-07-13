@@ -51,7 +51,8 @@ def make_wisdm_v1_dset_train_val(args,subj_ids):
     action_name_dict = dict(zip(range(len(activities_list)),activities_list))
     x = np.load('datasets/wisdm_v1/X.npy')
     y = np.load('datasets/wisdm_v1/y.npy')
-    train_ids = subj_ids[:-2]
+    num_train_ids = len(subj_ids) - min(2,len(subj_ids)//2)
+    train_ids = subj_ids[:num_train_ids]
     users = np.load('datasets/wisdm_v1/users.npy')
     train_idxs_to_user = np.zeros(users.shape[0]).astype(np.bool)
     for subj_id in train_ids:
@@ -64,7 +65,7 @@ def make_wisdm_v1_dset_train_val(args,subj_ids):
     if len(subj_ids) <= 2: return dset_train, dset_train, selected_acts
 
     # else make val dset
-    val_ids = subj_ids[-2:]
+    val_ids = subj_ids[num_train_ids:]
     val_idxs_to_user = np.zeros(users.shape[0]).astype(np.bool)
     for subj_id in val_ids:
         new_users = users==subj_id
@@ -80,7 +81,8 @@ def make_wisdm_watch_dset_train_val(args,subj_ids):
     with open('datasets/wisdm-dataset/activity_key.txt') as f: r=f.readlines()
     activities_list = [x.split(' = ')[0] for x in r if ' = ' in x]
     action_name_dict = dict(zip(range(len(activities_list)),activities_list))
-    train_ids = subj_ids[:-2]
+    num_train_ids = len(subj_ids) - min(2,len(subj_ids)//2)
+    train_ids = subj_ids[:num_train_ids]
     x_train = np.concatenate([np.load(f'datasets/wisdm-dataset/np_data/{s}.npy') for s in train_ids])
     y_train = np.concatenate([np.load(f'datasets/wisdm-dataset/np_data/{s}_labels.npy') for s in train_ids])
     certains_train = np.concatenate([np.load(f'datasets/wisdm-dataset/np_data/{s}_certains.npy') for s in train_ids])
@@ -91,7 +93,7 @@ def make_wisdm_watch_dset_train_val(args,subj_ids):
     if len(subj_ids) <= 2: return dset_train, dset_train, selected_acts
 
     # else make val dset
-    val_ids = subj_ids[-2:]
+    val_ids = subj_ids[num_train_ids:]
     x_val = np.concatenate([np.load(f'datasets/wisdm-dataset/np_data/{s}.npy') for s in val_ids])
     y_val = np.concatenate([np.load(f'datasets/wisdm-dataset/np_data/{s}_labels.npy') for s in val_ids])
     certains_val = np.concatenate([np.load(f'datasets/wisdm-dataset/np_data/{s}_certains.npy') for s in val_ids])
@@ -103,8 +105,8 @@ def make_wisdm_watch_dset_train_val(args,subj_ids):
 
 def make_uci_dset_train_val(args,subj_ids):
     action_name_dict = {1:'walking',2:'walking upstairs',3:'walking downstairs',4:'sitting',5:'standing',6:'lying',7:'stand_to_sit',9:'sit_to_stand',10:'sit_to_lit',11:'lie_to_sit',12:'stand_to_lie',13:'lie_to_stand'}
-    train_ids = subj_ids[:-2]
-    val_ids = subj_ids[-2:]
+    num_train_ids = len(subj_ids) - min(2,len(subj_ids)//2)
+    train_ids = subj_ids[:num_train_ids]
     x_train = np.concatenate([np.load(f'datasets/UCI2/np_data/user{s}.npy') for s in train_ids])
     y_train = np.concatenate([np.load(f'datasets/UCI2/np_data/user{s}_labels.npy') for s in train_ids])
     x_train = x_train[y_train<7] # Labels still begin at 1 at this point as
@@ -117,6 +119,7 @@ def make_uci_dset_train_val(args,subj_ids):
     if len(subj_ids) <= 2: return dset_train, dset_train, selected_acts
 
     # else make val dset
+    val_ids = subj_ids[num_train_ids:]
     x_val = np.concatenate([np.load(f'datasets/UCI2/np_data/user{s}.npy') for s in val_ids])
     y_val = np.concatenate([np.load(f'datasets/UCI2/np_data/user{s}_labels.npy') for s in val_ids])
     x_val = x_val[y_val<7] # Labels still begin at 1 at this point as
@@ -128,7 +131,8 @@ def make_uci_dset_train_val(args,subj_ids):
 
 def make_pamap_dset_train_val(args,subj_ids):
     action_name_dict = {1:'lying',2:'sitting',3:'standing',4:'walking',5:'running',6:'cycling',7:'Nordic walking',9:'watching TV',10:'computer work',11:'car driving',12:'ascending stairs',13:'descending stairs',16:'vacuum cleaning',17:'ironing',18:'folding laundry',19:'house cleaning',20:'playing soccer',24:'rope jumping'}
-    train_ids = subj_ids[:-2]
+    num_train_ids = len(subj_ids) - min(2,len(subj_ids)//2)
+    train_ids = subj_ids[:num_train_ids]
     x_train = np.concatenate([np.load(f'datasets/PAMAP2_Dataset/np_data/subject{s}.npy') for s in train_ids])
     y_train = np.concatenate([np.load(f'datasets/PAMAP2_Dataset/np_data/subject{s}_labels.npy') for s in train_ids])
     x_train,y_train,selected_acts = preproc_xys(x_train,y_train,args.step_size,args.window_size,action_name_dict)
@@ -136,7 +140,7 @@ def make_pamap_dset_train_val(args,subj_ids):
     if len(subj_ids) <= 2: return dset_train, dset_train, selected_acts
 
     # else make val dset
-    val_ids = subj_ids[-2:]
+    val_ids = subj_ids[num_train_ids:]
     x_val = np.concatenate([np.load(f'datasets/PAMAP2_Dataset/np_data/subject{s}.npy') for s in val_ids])
     y_val = np.concatenate([np.load(f'datasets/PAMAP2_Dataset/np_data/subject{s}_labels.npy') for s in val_ids])
     x_val,y_val,selected_acts = preproc_xys(x_val,y_val,args.step_size,args.window_size,action_name_dict)
