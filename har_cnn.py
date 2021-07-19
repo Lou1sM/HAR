@@ -1,4 +1,6 @@
 import sys
+from copy import deepcopy
+from scipy import stats
 import os
 import argparse
 import math
@@ -163,8 +165,8 @@ class HARLearner():
             val_acc = -1 if ARGS.test or len(gt_idx) == 0 else label_funcs.accuracy(val_pred_array_ordered,dset_val.y.detach().cpu().numpy())
             val_f1 = -1 if ARGS.test or len(gt_idx) == 0 else label_funcs.mean_f1(val_pred_array_ordered,dset_val.y.detach().cpu().numpy())
             if not ARGS.suppress_prints:
-                print(f'MLP gt acc: {val_acc}')
-                print(f'MLP non-gt mean_f1: {val_f1}')
+                print(f'MLP val acc: {val_acc}')
+                print(f'MLP val mean_f1: {val_f1}')
             if ARGS.test or len(gt_idx) == 0 or val_acc > best_val_acc:
                 best_val_acc = val_acc
                 best_val_f1 = val_f1
@@ -194,86 +196,139 @@ class HARLearner():
 
     def cross_train(self,user_dsets,num_epochs,frac_gt_labels,exp_dir):
         results_matrix = np.zeros((len(user_dsets),len(user_dsets)))
-        pred_predee = {}
+        pred_predee = [[] for _ in range(len(user_dsets))]
+        self_diag_preds = []
         for dset_idx,(dset,sa) in enumerate(user_dsets.values()):
             all_user_preds = {}
-            best_pred_array_ordered = -np.ones(len(dset.y))
             n = label_funcs.get_num_labels(dset.y)
-            if n != self.num_classes:
+            if n != self.num_classes and ARGS.fussy_label_numbers:
                 print(f"Not training on {dset_idx} because only {n} labels, should be {self.num_classes}")
                 continue
-            dl = data.DataLoader(dset,batch_sampler=data.BatchSampler(data.RandomSampler(dset),self.batch_size,drop_last=False),pin_memory=False)
-            if frac_gt_labels == 0:
-                gt_idx = np.array([], dtype=np.int)
-            elif frac_gt_labels <= 0.5:
-                gt_idx = np.arange(len(dset), step=int(1/frac_gt_labels))
-            else:
-                non_gt_idx = np.arange(len(dset), step=int(1/(1-frac_gt_labels)))
-                gt_idx = np.delete(np.arange(len(dset)),non_gt_idx)
-            gt_mask = torch.zeros_like(dset.y)
-            gt_mask[gt_idx] = 1
-            assert abs(len(gt_idx)/len(dset) - frac_gt_labels) < .01
-            best_acc = 0
-            for epoch in range(num_epochs):
-                pred_list = []
-                idx_list = []
-                best_f1 = 0
-                self.enc.train()
-                self.mlp.train()
-                for batch_idx, (xb,yb,idx) in enumerate(dl):
-                    latent = self.enc(xb)
-                    batch_mask = gt_mask[idx]
-                    label_pred = self.mlp(latent) if latent.ndim == 2 else self.mlp(latent[:,:,0,0])
-                    label_loss = self.pseudo_label_lf(label_pred,yb.long())
+            acc, f1, pred_array = self.train_with_fract_gts_on(dset,num_epochs,frac_gt_labels,reinit=True)
+            self_diag_preds.append(pred_array)
+            results_matrix[dset_idx,dset_idx] = round(acc,4)
+            for dset_idx_val,(dset_val,sa) in enumerate(user_dsets.values()):
+                if dset_idx_val == dset_idx: continue
+                acc_val, f1_val, pred_array_ordered_val = self.val_on(dset_val)
+                pred_predee[dset_idx_val].append(pred_array_ordered_val)
+                results_matrix[dset_idx,dset_idx_val] = round(acc_val,4)
+        pseudo_label_dsets = []
+        for dset_idx,(dset,sa) in enumerate(user_dsets.values()):
+            preds = pred_predee[dset_idx]
+            gt_labels = dset.y.detach().cpu().numpy()
+            pred_list_translated =  preds if ARGS.test else label_funcs.debable(preds,pivot=gt_labels)
+            pred_array = np.stack(pred_list_translated)
+            mode_ensemble_preds = stats.mode(pred_array,axis=0).mode[0]
+            full_ensemble_acc = -1 if ARGS.test else label_funcs.accuracy(mode_ensemble_preds,gt_labels)
+            all_agrees = np.ones(len(dset)).astype(np.bool) if ARGS.test else np.all(pred_array==pred_array[0,:], axis=0)
+            agreed_preds = mode_ensemble_preds[all_agrees]
+            agreed_gt_labels = gt_labels[all_agrees]
+            all_agree_ensemble_acc = -1 if ARGS.test or not all_agrees.any() else label_funcs.accuracy(agreed_preds,agreed_gt_labels)
+            print(f"Ensemble acc on {dset_idx}: {full_ensemble_acc}, {all_agree_ensemble_acc} {all_agrees.sum()/len(all_agrees)}")
+            pseudo_label_dset = deepcopy(dset)
+            pseudo_label_dsets.append((pseudo_label_dset,all_agrees))
+            # Convert pred_array to multihot form
+            multihot_pred_array = np.stack([(pred_array==lab).sum(axis=0) for lab in range(self.num_classes)])
+            temperature = .5
+            ensemble_prob_tensor = torch.tensor(multihot_pred_array*temperature,device='cuda').float().softmax(dim=0)
+            #pseudo_label_dset.y = ensemble_prob_tensor.transpose(0,1)
+            pseudo_label_dset.y = torch.tensor(mode_ensemble_preds,device='cuda')
+            all_agrees_t = torch.tensor(all_agrees,device='cuda')
+            prob_mask = ensemble_prob_tensor.max(axis=0)[0]
+            #acc, f1, pred_array = self.train_on(pseudo_label_dset,num_epochs,lf=true_cross_entropy_with_logits,compute_acc=False)
+            acc, f1, train_pred_array = self.train_on(pseudo_label_dset,num_epochs,multiplicative_mask=prob_mask)
+            val_acc, val_f1, val_pred_array = self.val_on(dset)
+            print(label_funcs.label_counts(agreed_preds[agreed_preds==agreed_gt_labels]))
+            print(label_funcs.label_counts(mode_ensemble_preds))
+            print(f"Acc from pseudo_label training, train: {acc}\tval: {val_acc}")
+            if all_agree_ensemble_acc >= .95:
+                other_acc, other_f1, other_pred_array = self.train_with_fract_gts_on(dset,num_epochs,all_agrees.mean())
+                print(f"Acc from regular frac_gt training with same frac of gts: {other_acc}")
+            print()
+
+        print(results_matrix)
+        return results_matrix
+
+    def train_on(self,dset,num_epochs,multiplicative_mask='none',lf=None,compute_acc=True,reinit=True):
+        if reinit: self.reinit_nets()
+        self.enc.train()
+        self.mlp.train()
+        if lf is None: lf = self.pseudo_label_lf
+        best_acc = 0
+        best_pred_array_ordered = -np.ones(len(dset.y))
+        dl = data.DataLoader(dset,batch_sampler=data.BatchSampler(data.RandomSampler(dset),self.batch_size,drop_last=False),pin_memory=False)
+        for epoch in range(num_epochs):
+            pred_list = []
+            idx_list = []
+            best_f1 = 0
+            for batch_idx, (xb,yb,idx) in enumerate(dl):
+                latent = self.enc(xb)
+                label_pred = self.mlp(latent) if latent.ndim == 2 else self.mlp(latent[:,:,0,0])
+                label_loss = lf(label_pred,yb.long())
+                if multiplicative_mask is not 'none':
+                    batch_mask = multiplicative_mask[:self.batch_size] if ARGS.test else multiplicative_mask[idx]
                     loss = (label_loss*batch_mask).mean()
-                    if math.isnan(loss): set_trace()
-                    loss.backward()
-                    self.enc_opt.step(); self.enc_opt.zero_grad()
-                    self.mlp_opt.step(); self.mlp_opt.zero_grad()
-                    pred_list.append(label_pred.argmax(axis=1).detach().cpu().numpy())
-                    idx_list.append(idx.detach().cpu().numpy())
-                    if ARGS.test: break
-                pred_array = np.concatenate(pred_list)
-                idx_array = np.concatenate(idx_list)
-                pred_array_ordered = np.array([item[0] for item in sorted(zip(pred_array,idx_array),key=lambda x:x[1])])
-                acc = -1 if ARGS.test or len(gt_idx) == 0 else label_funcs.accuracy(pred_array_ordered,dset.y.detach().cpu().numpy())
-                f1 = -1 if ARGS.test or len(gt_idx) == 0 else label_funcs.mean_f1(pred_array_ordered,dset.y.detach().cpu().numpy())
-                if ARGS.test or len(gt_idx) == 0 or acc > best_acc:
+                else: loss =  label_loss.mean()
+                if math.isnan(loss): set_trace()
+                loss.backward()
+                self.enc_opt.step(); self.enc_opt.zero_grad()
+                self.mlp_opt.step(); self.mlp_opt.zero_grad()
+                pred_list.append(label_pred.argmax(axis=1).detach().cpu().numpy())
+                idx_list.append(idx.detach().cpu().numpy())
+                if ARGS.test: break
+            if ARGS.test:
+                return -1, -1, label_funcs.dummy_labels(self.num_classes,len(dset.y))
+            pred_array = np.concatenate(pred_list)
+            idx_array = np.concatenate(idx_list)
+            pred_array_ordered = np.array([item[0] for item in sorted(zip(pred_array,idx_array),key=lambda x:x[1])])
+            if compute_acc:
+                acc = -1 if ARGS.test else label_funcs.accuracy(pred_array_ordered,dset.y.detach().cpu().numpy())
+                f1 = -1 if ARGS.test else label_funcs.mean_f1(pred_array_ordered,dset.y.detach().cpu().numpy())
+                if ARGS.test or acc > best_acc:
                     best_pred_array_ordered = pred_array_ordered
                     best_acc = acc
                     best_f1 = f1
-            results_matrix[dset_idx,dset_idx] = round(best_acc,4)
-            self.enc.eval()
-            self.mlp.eval()
-            for dset_idx_val,(dset_val,sa) in enumerate(user_dsets.values()):
-                if dset_idx_val == dset_idx: continue
-                best_val_acc = 0
-                best_val_f1 = 0
-                pred_list_val = []
-                idx_list_val = []
-                dl_val = data.DataLoader(dset_val,batch_sampler=data.BatchSampler(data.RandomSampler(dset_val),self.batch_size,drop_last=False),pin_memory=False)
-                for batch_idx, (xb,yb,idx) in enumerate(dl_val):
-                    latent = self.enc(xb)
-                    label_pred = self.mlp(latent) if latent.ndim == 2 else self.mlp(latent[:,:,0,0])
-                    pred_list_val.append(label_pred.argmax(axis=1).detach().cpu().numpy())
-                    idx_list_val.append(idx.detach().cpu().numpy())
-                    if ARGS.test: break
-                pred_array_val = np.concatenate(pred_list_val)
-                idx_array_val = np.concatenate(idx_list_val)
-                pred_array_ordered_val = np.array([item[0] for item in sorted(zip(pred_array_val,idx_array_val),key=lambda x:x[1])])
-                if ARGS.test: break
-                if label_funcs.get_num_labels(dset_val.y) == 1: set_trace()
-                val_acc = -1 if ARGS.test or len(gt_idx) == 0 else label_funcs.accuracy(pred_array_ordered_val,dset_val.y.detach().cpu().numpy())
-                val_f1 = -1 if ARGS.test or len(gt_idx) == 0 else label_funcs.mean_f1(pred_array_ordered_val,dset_val.y.detach().cpu().numpy())
-                if ARGS.test or len(gt_idx) == 0 or val_acc > best_val_acc:
-                    best_val_acc = val_acc
-                    best_val_f1 = val_f1
-                    misc.torch_save({'enc':self.enc,'mlp':self.mlp},exp_dir,'best_model.pt')
-                results_matrix[dset_idx,dset_idx_val] = round(best_val_acc,4)
-                print(results_matrix)
-            self.reinit_nets()
-        print(results_matrix)
-        return results_matrix
+        return best_acc,best_f1,best_pred_array_ordered
+
+    def train_with_fract_gts_on(self,dset,num_epochs,frac_gt_labels,reinit=False):
+        if frac_gt_labels == 0:
+            gt_idx = np.array([], dtype=np.int)
+        elif frac_gt_labels <= 0.5:
+            gt_idx = np.arange(len(dset), step=int(1/frac_gt_labels))
+        else:
+            non_gt_idx = np.arange(len(dset), step=int(1/(1-frac_gt_labels)))
+            gt_idx = np.delete(np.arange(len(dset)),non_gt_idx)
+        gt_mask = torch.zeros_like(dset.y)
+        gt_mask[gt_idx] = 1
+        approx = len(gt_idx)/len(dset)
+        if abs(approx - frac_gt_labels) > .01:
+            print(f"frac_gts approximation is {approx}, instead of {frac_gt_labels}")
+        return self.train_on(dset,num_epochs,gt_mask,reinit=reinit)
+
+    def val_on(self,dset):
+        self.enc.eval()
+        self.mlp.eval()
+        pred_list = []
+        idx_list = []
+        dl = data.DataLoader(dset,batch_sampler=data.BatchSampler(data.RandomSampler(dset),self.batch_size,drop_last=False),pin_memory=False)
+        for batch_idx, (xb,yb,idx) in enumerate(dl):
+            latent = self.enc(xb)
+            label_pred = self.mlp(latent) if latent.ndim == 2 else self.mlp(latent[:,:,0,0])
+            pred_list.append(label_pred.argmax(axis=1).detach().cpu().numpy())
+            idx_list.append(idx.detach().cpu().numpy())
+            if ARGS.test: break
+        pred_array = np.concatenate(pred_list)
+        if ARGS.test:
+            return -1, -1, label_funcs.dummy_labels(self.num_classes,len(dset.y))
+        idx_array = np.concatenate(idx_list)
+        pred_array_ordered = np.array([item[0] for item in sorted(zip(pred_array,idx_array),key=lambda x:x[1])])
+        if label_funcs.get_num_labels(dset.y) == 1: set_trace()
+        acc = -1 if ARGS.test else label_funcs.accuracy(pred_array_ordered,dset.y.detach().cpu().numpy())
+        f1 = -1 if ARGS.test else label_funcs.mean_f1(pred_array_ordered,dset.y.detach().cpu().numpy())
+        return acc,f1,pred_array_ordered
+
+def true_cross_entropy_with_logits(pred,target):
+    return (-(pred*target).sum(dim=1) + torch.logsumexp(pred,dim=1)).mean()
 
 
 def main(args,subj_ids):
@@ -328,7 +383,6 @@ def main(args,subj_ids):
                 print(f"Excluding user {user_id}, only has {n} different labels, instead of {num_labels}")
                 bad_ids.append(user_id)
         dsets_by_id = {k:v for k,v in dsets_by_id.items() if k not in bad_ids}
-        print(len(dsets_by_id))
         har.cross_train(dsets_by_id,args.num_epochs,args.frac_gt_labels,exp_dir=exp_dir)
     else:
         dset_train, dset_val, selected_acts = make_dset_train_val(args,subj_ids)
@@ -343,6 +397,9 @@ if __name__ == "__main__":
 
     dset_options = ['PAMAP','UCI','WISDM-v1','WISDM-watch']
     parser = argparse.ArgumentParser()
+    group = parser.add_mutually_exclusive_group(required=False)
+    group.add_argument('--num_subjs',type=int)
+    group.add_argument('--subj_ids',type=str,nargs='+',default=['first'])
     parser.add_argument('--all_subjs',action='store_true')
     parser.add_argument('--alpha',type=float,default=.5)
     parser.add_argument('--batch_size',type=int,default=128)
@@ -351,6 +408,7 @@ if __name__ == "__main__":
     parser.add_argument('--enc_lr',type=float,default=1e-3)
     parser.add_argument('--exp_name',type=str,default="jim")
     parser.add_argument('--frac_gt_labels',type=float,default=0.1)
+    parser.add_argument('--fussy_label_numbers',action='store_true')
     parser.add_argument('--gpu',type=str,default='0')
     parser.add_argument('--load_pretrained',action='store_true')
     parser.add_argument('--mlp_lr',type=float,default=1e-3)
@@ -358,7 +416,6 @@ if __name__ == "__main__":
     parser.add_argument('--parallel',action='store_true')
     parser.add_argument('--save','-s',action='store_true')
     parser.add_argument('--step_size',type=int,default=5)
-    parser.add_argument('--subj_ids',type=str,nargs='+',default=['first'])
     parser.add_argument('--suppress_prints',action='store_true')
     parser.add_argument('--test','-t',action='store_true')
     parser.add_argument('--verbose',action='store_true')
@@ -378,6 +435,7 @@ if __name__ == "__main__":
     elif ARGS.dset == 'WISDM-v1':
         all_possible_ids = [str(x) for x in range(1,37)] #Paper says 29 users but ids go up to 36
     if ARGS.all_subjs: subj_ids=all_possible_ids
+    elif ARGS.num_subjs is not None: subj_ids = all_possible_ids[:ARGS.num_subjs]
     elif ARGS.subj_ids == ['first']: subj_ids = all_possible_ids[:1]
     else: subj_ids = ARGS.subj_ids
     bad_ids = [x for x in subj_ids if x not in all_possible_ids]
