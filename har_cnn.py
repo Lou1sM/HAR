@@ -1,4 +1,6 @@
 import sys
+from scipy.stats import multivariate_normal
+from hmmlearn import hmm
 from copy import deepcopy
 from scipy import stats
 import os
@@ -37,6 +39,28 @@ class EncByLayer(nn.Module):
             if self.verbose: print(x.shape)
         return x
 
+class DecByLayer(nn.Module):
+    def __init__(self,x_filters,y_filters,x_strides,y_strides,verbose):
+        super(DecByLayer,self).__init__()
+        self.verbose = verbose
+        num_layers = len(x_filters)
+        assert all(len(x)==num_layers for x in (y_filters,x_strides,y_strides))
+        ncvs = [4*2**i for i in reversed(range(num_layers))]+[1]
+        conv_trans_layers = [nn.Sequential(
+                nn.ConvTranspose2d(ncvs[i],ncvs[i+1],(x_filters[i],y_filters[i]),(x_strides[i],y_strides[i])),
+                nn.BatchNorm2d(ncvs[i+1]),
+                nn.LeakyReLU(0.3),
+                )
+            for i in range(num_layers)]
+        self.conv_trans_layers = nn.ModuleList(conv_trans_layers)
+
+    def forward(self,x):
+        if self.verbose: print(x.shape)
+        for conv_trans_layer in self.conv_trans_layers:
+            x = conv_trans_layer(x)
+            if self.verbose: print(x.shape)
+        return x
+
 class Var_BS_MLP(nn.Module):
     def __init__(self,input_size,hidden_size,output_size):
         super(Var_BS_MLP,self).__init__()
@@ -56,24 +80,24 @@ class Var_BS_MLP(nn.Module):
         return x
 
 class HARLearner():
-    def __init__(self,enc,mlp,batch_size,num_classes):
+    def __init__(self,enc,mlp,dec,batch_size,num_classes):
         self.batch_size = batch_size
         self.num_classes = num_classes
         self.enc = enc
+        self.dec = dec
         self.mlp = mlp
         self.pseudo_label_lf = nn.CrossEntropyLoss(reduction='none')
         self.rec_lf = nn.MSELoss()
 
-        #self.dl = data.DataLoader(self.dset,batch_sampler=data.BatchSampler(data.RandomSampler(dset),batch_size,drop_last=True),pin_memory=False)
-        #self.determin_dl = data.DataLoader(self.dset,batch_sampler=data.BatchSampler(data.SequentialSampler(dset),batch_size,drop_last=False),pin_memory=False)
-
         self.enc_opt = torch.optim.Adam(self.enc.parameters(),lr=ARGS.enc_lr)
+        self.dec_opt = torch.optim.Adam(self.dec.parameters(),lr=ARGS.dec_lr)
         self.mlp_opt = torch.optim.Adam(self.mlp.parameters(),lr=ARGS.mlp_lr)
 
-    def get_latents(self):
+    def get_latents(self,dset):
         self.enc.eval()
         collected_latents = []
-        for idx, (xb,yb,tb) in enumerate(self.determin_dl):
+        determin_dl = data.DataLoader(dset,batch_sampler=data.BatchSampler(data.SequentialSampler(dset),self.batch_size,drop_last=False),pin_memory=False)
+        for idx, (xb,yb,tb) in enumerate(determin_dl):
             batch_latents = self.enc(xb)
             batch_latents = batch_latents.view(batch_latents.shape[0],-1).detach().cpu().numpy()
             collected_latents.append(batch_latents)
@@ -88,11 +112,18 @@ class HARLearner():
             elif isinstance(m,nn.BatchNorm2d):
                 torch.nn.init.ones_(m.weight.data)
                 torch.nn.init.zeros_(m.bias.data)
-        for m in self.enc.modules():
-            if isinstance(m,nn.Linear):
+        for m in self.dec.modules():
+            if isinstance(m,nn.ConvTranspose2d):
                 torch.nn.init.xavier_uniform(m.weight.data)
                 torch.nn.init.zeros_(m.bias.data)
             elif isinstance(m,nn.BatchNorm2d):
+                torch.nn.init.ones_(m.weight.data)
+                torch.nn.init.zeros_(m.bias.data)
+        for m in self.mlp.modules():
+            if isinstance(m,nn.Linear):
+                torch.nn.init.xavier_uniform(m.weight.data)
+                torch.nn.init.zeros_(m.bias.data)
+            elif isinstance(m,nn.BatchNorm1d):
                 torch.nn.init.ones_(m.weight.data)
                 torch.nn.init.zeros_(m.bias.data)
 
@@ -114,8 +145,6 @@ class HARLearner():
         assert abs(len(gt_idx)/len(dset_train) - frac_gt_labels) < .01
         for epoch in range(num_epochs):
             epoch_loss = 0
-            epoch_pseudo_label_losses = []
-            epoch_losses = []
             train_pred_list = []
             train_idx_list = []
             val_pred_list = []
@@ -132,7 +161,6 @@ class HARLearner():
                 label_pred = self.mlp(latent) if latent.ndim == 2 else self.mlp(latent[:,:,0,0])
                 label_loss = self.pseudo_label_lf(label_pred,yb.long())
                 loss = (label_loss*batch_mask).mean()
-                if math.isnan(loss): set_trace()
                 loss.backward()
                 self.enc_opt.step(); self.enc_opt.zero_grad()
                 self.mlp_opt.step(); self.mlp_opt.zero_grad()
@@ -230,16 +258,13 @@ class HARLearner():
             # Convert pred_array to multihot form
             multihot_pred_array = np.stack([(pred_array==lab).sum(axis=0) for lab in range(self.num_classes)])
             temperature = .5
-            ensemble_prob_tensor = torch.tensor(multihot_pred_array*temperature,device='cuda').float().softmax(dim=0)
-            #pseudo_label_dset.y = ensemble_prob_tensor.transpose(0,1)
-            pseudo_label_dset.y = torch.tensor(mode_ensemble_preds,device='cuda')
-            all_agrees_t = torch.tensor(all_agrees,device='cuda')
-            prob_mask = ensemble_prob_tensor.max(axis=0)[0]
-            #acc, f1, pred_array = self.train_on(pseudo_label_dset,num_epochs,lf=true_cross_entropy_with_logits,compute_acc=False)
-            acc, f1, train_pred_array = self.train_on(pseudo_label_dset,num_epochs,multiplicative_mask=prob_mask)
+            ensemble_prob_tensor = cudify(multihot_pred_array*temperature).float().softmax(dim=0)
+            all_agrees_t = cudify(all_agrees)
+            prob_mask = npify(ensemble_prob_tensor.max(axis=0)[0])
+            acc, pseudo_label_pred_array = self.pseudo_label_meta_loop(pseudo_label_dset,mode_ensemble_preds,num_meta_epochs=ARGS.num_pseudo_label_epochs,ensemble_mask=prob_mask)
             val_acc, val_f1, val_pred_array = self.val_on(dset)
-            print(label_funcs.label_counts(agreed_preds[agreed_preds==agreed_gt_labels]))
-            print(label_funcs.label_counts(mode_ensemble_preds))
+            print("ensemble_preds label_counts on agreed points:", label_funcs.label_counts(agreed_preds[agreed_preds==agreed_gt_labels]))
+            print("ensemble_preds label_counts on all points:", label_funcs.label_counts(mode_ensemble_preds))
             print(f"Acc from pseudo_label training, train: {acc}\tval: {val_acc}")
             if all_agree_ensemble_acc >= .95:
                 other_acc, other_f1, other_pred_array = self.train_with_fract_gts_on(dset,num_epochs,all_agrees.mean())
@@ -249,12 +274,58 @@ class HARLearner():
         print(results_matrix)
         return results_matrix
 
-    def train_on(self,dset,num_epochs,multiplicative_mask='none',lf=None,compute_acc=True,reinit=True):
+    def pseudo_label_meta_loop(self,pseudo_label_dset,pseudo_labels_array,num_meta_epochs,ensemble_mask):
+        prev_probs = np.zeros((len(pseudo_label_dset),self.num_classes))
+        for epoch_num in range(num_meta_epochs):
+            if ARGS.test:
+                new_pred_labels = label_funcs.dummy_labels(self.num_classes,len(pseudo_label_dset))
+                new_pred_labels = new_pred_labels.astype(np.long)
+                combined_mask = torch.ones(len(pseudo_label_dset.y)).bool()
+                weighted_probs = torch.ones(len(pseudo_label_dset.y)).bool()
+            else:
+                latents = self.get_latents(pseudo_label_dset)
+                print('umapping')
+                umapped_latents = latents if ARGS.no_umap else umap.UMAP(min_dist=0,n_neighbors=60,n_components=2,random_state=42).fit_transform(latents.squeeze())
+                print('modelling')
+                model = hmm.GaussianHMM(self.num_classes,'full')
+                model.params = 'mc'
+                model.init_params = 'mc'
+                model.startprob_ = np.ones(self.num_classes)/self.num_classes
+                num_action_blocks = len([item for idx,item in enumerate(pseudo_label_dset.y) if pseudo_label_dset.y[idx-1] != item])
+                prob_new_action = num_action_blocks/len(pseudo_label_dset)
+                model.transmat_ = (np.eye(self.num_classes) * (1-prob_new_action)) + (np.ones((self.num_classes,self.num_classes))*prob_new_action/self.num_classes)
+                model.fit(umapped_latents)
+                new_pred_labels = model.predict(umapped_latents)
+                new_pred_probs = model.predict_proba(umapped_latents)
+                subsample_size = min(30000,pseudo_label_dset.y.shape[0])
+                trans_dict, leftovers = label_funcs.get_trans_dict(new_pred_labels,pseudo_label_dset.y,subsample_size=subsample_size)
+                new_pred_labels = np.array([trans_dict[l] for l in new_pred_labels])
+                new_pred_labels = new_pred_labels.astype(np.int)
+                mvns = [multivariate_normal(m,c) for m,c in zip(model.means_,model.covars_)]
+                probs=np.array([mvns[label].pdf(mean) for mean,label in zip(umapped_latents,new_pred_labels)])
+                probs *= new_pred_probs.max(axis=1) #Include probs from HMM itself too, as well as normals
+                probs = np.clip(probs,0,1)
+                combined_mask = ensemble_mask - probs
+                increase_conf_idxs = new_pred_labels==pseudo_labels_array
+                combined_mask[increase_conf_idxs] += 2*probs[increase_conf_idxs]
+                replace_idxs = probs>ensemble_mask
+                pseudo_labels_array[replace_idxs] = new_pred_labels[replace_idxs]
+                combined_mask[replace_idxs] = abs(combined_mask[replace_idxs])
+                pseudo_label_dset.y = cudify(pseudo_labels_array)
+                if not ARGS.suppress_prints: print('probs mean', probs.mean())
+            acc, f1, pred_array = self.train_on(pseudo_label_dset,num_epochs=5,multiplicative_mask=cudify(combined_mask),rlmbda=ARGS.rlmbda)
+            prev_probs = probs
+            if ARGS.test: continue
+        return acc, pred_array
+
+    def train_on(self,dset,num_epochs,multiplicative_mask='none',lf=None,compute_acc=True,reinit=True,rlmbda=0):
         if reinit: self.reinit_nets()
         self.enc.train()
+        self.dec.train()
         self.mlp.train()
         if lf is None: lf = self.pseudo_label_lf
         best_acc = 0
+        best_f1 = 0
         best_pred_array_ordered = -np.ones(len(dset.y))
         dl = data.DataLoader(dset,batch_sampler=data.BatchSampler(data.RandomSampler(dset),self.batch_size,drop_last=False),pin_memory=False)
         for epoch in range(num_epochs):
@@ -267,11 +338,15 @@ class HARLearner():
                 label_loss = lf(label_pred,yb.long())
                 if multiplicative_mask is not 'none':
                     batch_mask = multiplicative_mask[:self.batch_size] if ARGS.test else multiplicative_mask[idx]
-                    loss = (label_loss*batch_mask).mean()
-                else: loss =  label_loss.mean()
+                    loss = rlmbda + (label_loss*batch_mask).mean()
+                else: loss = rlmbda + label_loss.mean()
                 if math.isnan(loss): set_trace()
+                if rlmbda>0:
+                    rec_loss = self.rec_lf(self.dec(latent),xb)
+                    loss += rec_loss
                 loss.backward()
                 self.enc_opt.step(); self.enc_opt.zero_grad()
+                self.dec_opt.step(); self.dec_opt.zero_grad()
                 self.mlp_opt.step(); self.mlp_opt.zero_grad()
                 pred_list.append(label_pred.argmax(axis=1).detach().cpu().numpy())
                 idx_list.append(idx.detach().cpu().numpy())
@@ -290,7 +365,7 @@ class HARLearner():
                     best_f1 = f1
         return best_acc,best_f1,best_pred_array_ordered
 
-    def train_with_fract_gts_on(self,dset,num_epochs,frac_gt_labels,reinit=False):
+    def train_with_fract_gts_on(self,dset,num_epochs,frac_gt_labels,reinit=False,rlmbda=0):
         if frac_gt_labels == 0:
             gt_idx = np.array([], dtype=np.int)
         elif frac_gt_labels <= 0.5:
@@ -303,10 +378,11 @@ class HARLearner():
         approx = len(gt_idx)/len(dset)
         if abs(approx - frac_gt_labels) > .01:
             print(f"frac_gts approximation is {approx}, instead of {frac_gt_labels}")
-        return self.train_on(dset,num_epochs,gt_mask,reinit=reinit)
+        return self.train_on(dset,num_epochs,gt_mask,reinit=reinit,rlmbda=rlmbda)
 
     def val_on(self,dset):
         self.enc.eval()
+        self.dec.eval()
         self.mlp.eval()
         pred_list = []
         idx_list = []
@@ -330,6 +406,8 @@ class HARLearner():
 def true_cross_entropy_with_logits(pred,target):
     return (-(pred*target).sum(dim=1) + torch.logsumexp(pred,dim=1)).mean()
 
+def cudify(x): return torch.tensor(x,device='cuda')
+def npify(t): return t.detach().cpu().numpy()
 
 def main(args,subj_ids):
     prep_start_time = time.time()
@@ -340,6 +418,10 @@ def main(args,subj_ids):
         x_strides = (2,2,1,1)
         y_strides = (1,1,1,1)
         max_pools = (2,2,2,2)
+        x_filters_trans = (6,20,20,40)
+        y_filters_trans = (8,8,6,6)
+        x_strides_trans = (1,2,3,4)
+        y_strides_trans = (1,1,2,1)
         num_labels = 12
     elif args.dset == 'UCI':
         x_filters = (50,40,4,4)
@@ -347,6 +429,10 @@ def main(args,subj_ids):
         x_strides = (2,2,1,1)
         y_strides = (1,1,3,1)
         max_pools = ((2,1),(3,1),(2,1),1)
+        x_filters_trans = (30,30,20,10)
+        y_filters_trans = (2,3,1,1)
+        x_strides_trans = (1,3,2,2)
+        y_strides_trans = (1,3,1,2)
         num_labels = 6
     elif args.dset == 'WISDM-v1':
         x_filters = (50,40,4,4)
@@ -354,6 +440,10 @@ def main(args,subj_ids):
         x_strides = (2,2,1,1)
         y_strides = (1,1,1,1)
         max_pools = ((2,1),(3,1),(2,1),1)
+        x_filters_trans = (30,30,20,10)
+        y_filters_trans = (2,2,1,1)
+        x_strides_trans = (1,3,2,2)
+        y_strides_trans = (1,1,1,1)
         num_labels = 5
     elif args.dset == 'WISDM-watch':
         x_filters = (50,40,4,4)
@@ -361,16 +451,22 @@ def main(args,subj_ids):
         x_strides = (2,2,1,1)
         y_strides = (1,1,3,1)
         max_pools = ((2,1),(3,1),(2,1),1)
+        x_filters_trans = (30,30,20,10)
+        y_filters_trans = (2,3,1,1)
+        x_strides_trans = (1,3,2,2)
+        y_strides_trans = (1,3,1,2)
         num_labels = 17
     enc = EncByLayer(x_filters,y_filters,x_strides,y_strides,max_pools,verbose=args.verbose)
+    dec = DecByLayer(x_filters_trans,y_filters_trans,x_strides_trans,y_strides_trans,verbose=args.verbose)
     mlp = Var_BS_MLP(32,25,num_labels)
     if args.load_pretrained:
         enc.load_state_dict(torch.load('enc_pretrained.pt'))
         mlp.load_state_dict(torch.load('dec_pretrained.pt'))
     enc.cuda()
+    dec.cuda()
     mlp.cuda()
 
-    har = HARLearner(enc=enc,mlp=mlp,batch_size=args.batch_size,num_classes=num_labels)
+    har = HARLearner(enc=enc,mlp=mlp,dec=dec,batch_size=args.batch_size,num_classes=num_labels)
     exp_dir = os.path.join(f'experiments/{args.exp_name}')
 
     train_start_time = time.time()
@@ -404,6 +500,7 @@ if __name__ == "__main__":
     parser.add_argument('--alpha',type=float,default=.5)
     parser.add_argument('--batch_size',type=int,default=128)
     parser.add_argument('--cross_train',action='store_true')
+    parser.add_argument('--dec_lr',type=float,default=1e-3)
     parser.add_argument('--dset',type=str,default='PAMAP',choices=dset_options)
     parser.add_argument('--enc_lr',type=float,default=1e-3)
     parser.add_argument('--exp_name',type=str,default="jim")
@@ -413,11 +510,14 @@ if __name__ == "__main__":
     parser.add_argument('--load_pretrained',action='store_true')
     parser.add_argument('--mlp_lr',type=float,default=1e-3)
     parser.add_argument('--num_epochs',type=int,default=30)
+    parser.add_argument('--num_pseudo_label_epochs',type=int,default=3)
     parser.add_argument('--parallel',action='store_true')
+    parser.add_argument('--rlmbda',type=float,default=.1)
     parser.add_argument('--save','-s',action='store_true')
     parser.add_argument('--step_size',type=int,default=5)
     parser.add_argument('--suppress_prints',action='store_true')
     parser.add_argument('--test','-t',action='store_true')
+    parser.add_argument('--no_umap',action='store_true')
     parser.add_argument('--verbose',action='store_true')
     parser.add_argument('--window_size',type=int,default=512)
     ARGS = parser.parse_args()
@@ -425,6 +525,7 @@ if __name__ == "__main__":
     if ARGS.test and ARGS.save:
         print("Shouldn't be saving for a test run"); sys.exit()
     if ARGS.test: ARGS.num_meta_epochs = 2
+    elif not ARGS.no_umap: import umap
     if ARGS.dset == 'PAMAP':
         all_possible_ids = [str(x) for x in range(101,110)]
     elif ARGS.dset == 'UCI':
