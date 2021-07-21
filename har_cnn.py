@@ -164,7 +164,7 @@ class HARLearner():
         if isinstance(pseudo_labels,np.ndarray):
             pseudo_labels = torch.tensor(pseudo_labels)
         pseudo_label_dset = StepDataset(self.dset.x,pseudo_labels,device='cuda',window_size=self.dset.window_size,step_size=self.dset.step_size, pl_training=False)
-        pseudo_label_dl = data.DataLoader(pseudo_label_dset,batch_sampler=data.BatchSampler(data.RandomSampler(pseudo_label_dset),self.batch_size,drop_last=True),pin_memory=False)
+        pseudo_label_dl = data.DataLoader(pseudo_label_dset,batch_sampler=data.BatchSampler(data.RandomSampler(pseudo_label_dset),self.batch_size,drop_last=False),pin_memory=False)
         all_pseudo_label_losses = []
         start_indexing_at = position_in_meta_loop*num_epochs*len(pseudo_label_dl)
         for epoch in range(num_epochs):
@@ -173,17 +173,18 @@ class HARLearner():
             epoch_pseudo_label_losses = []
             epoch_losses = []
             best_loss = np.inf
+            pred_list = []
+            idx_list = []
             assert (pseudo_label_dset.x==self.dset.x).all()
             for batch_idx, (xb,yb,idx) in enumerate(pseudo_label_dl):
                 batch_mask = mask[idx]
                 latent = self.enc(xb)
                 latent = utils.noiseify(latent,ARGS.noise)
                 if batch_mask.any():
-                    latents_to_pseudo_label_train = latent[batch_mask]
                     try:
-                        pseudo_label_pred = self.mlp(latents_to_pseudo_label_train[:,:,0,0])
+                        pseudo_label_pred = self.mlp(latent[:,:,0,0])
                     except ValueError: set_trace()
-                    pseudo_label_loss = self.pseudo_label_lf(pseudo_label_pred,yb[batch_mask])
+                    pseudo_label_loss = self.pseudo_label_lf(pseudo_label_pred[batch_mask],yb.long()[batch_mask])
                 else:
                     pseudo_label_loss = torch.tensor(0,device=self.device)
                 if not batch_mask.all():
@@ -198,6 +199,8 @@ class HARLearner():
                 self.enc_opt.step(); self.enc_opt.zero_grad()
                 self.dec_opt.step(); self.dec_opt.zero_grad()
                 self.mlp_opt.step(); self.mlp_opt.zero_grad()
+                pred_list.append(pseudo_label_pred.argmax(axis=1).detach().cpu().numpy())
+                idx_list.append(idx.detach().cpu().numpy())
                 total_idx = start_indexing_at + epoch*len(pseudo_label_dl) + batch_idx
                 if batch_mask.any():
                     #epoch_pseudo_label_loss += pseudo_label_loss.item()/batch_mask.sum()
@@ -210,6 +213,9 @@ class HARLearner():
                     epoch_rec_losses.append(rec_loss)
                 epoch_losses.append(loss)
                 if ARGS.test: break
+            pred_array = np.concatenate(pred_list)
+            idx_array = np.concatenate(idx_list)
+            pred_array_ordered = np.array([item[0] for item in sorted(zip(pred_array,idx_array),key=lambda x:x[1])])
             if ARGS.test: break
             if epoch_loss < best_loss:
                 best_loss = epoch_loss
@@ -218,14 +224,14 @@ class HARLearner():
                 count += 1
             if count > 4: break
             assert (pseudo_label_dset.x==self.dset.x).all()
-        return all_pseudo_label_losses
+        return pred_array_ordered
 
     def train_meta_loop(self,num_pre_epochs,num_meta_epochs,num_pseudo_label_epochs,prob_thresh,selected_acts,exp_dir):
         writer = SummaryWriter()
         self.rec_train(num_pre_epochs)
         old_pred_labels = -np.ones(self.dset.y.shape)
         plt.switch_backend('agg')
-        print('modelling')
+        np_gt_labels = self.dset.y.detach().cpu().numpy().astype(int)
         for epoch_num in range(num_meta_epochs):
             print('Meta Epoch:', epoch_num)
             if ARGS.test:
@@ -240,8 +246,9 @@ class HARLearner():
             else:
                 latents = self.get_latents()
                 print('umapping')
-                umapped_latents = umap.UMAP(min_dist=0,n_neighbors=60,n_components=2,random_state=42).fit_transform(latents.squeeze())
+                umapped_latents = latents if ARGS.no_umap else umap.UMAP(min_dist=0,n_neighbors=60,n_components=2,random_state=42).fit_transform(latents.squeeze())
                 model = hmm.GaussianHMM(self.num_classes,'full')
+                print('modelling')
                 model.params = 'mc'
                 model.init_params = 'mc'
                 model.startprob_ = np.ones(self.num_classes)/self.num_classes
@@ -257,25 +264,25 @@ class HARLearner():
                 writer.add_figure(f'umapped_latents/{epoch_num}',fig)
                 print('Prob_thresh mask:',sum(mask),sum(mask)/len(new_pred_labels))
                 if ARGS.save: np.save('test_umapped_latents.npy',umapped_latents)
-                new_pred_labels = utils.translate_labellings(new_pred_labels,self.dset.y,subsample_size=30000)
+                new_pred_labels = utils.translate_labellings(new_pred_labels,np_gt_labels,subsample_size=30000)
             if epoch_num > 0:
                 mask2 = new_pred_labels==old_pred_labels
                 print('Sames:', sum(mask2), sum(mask2)/len(new_pred_labels))
                 mask = mask*mask2
                 assert (new_pred_labels[mask]==old_pred_labels[mask]).all()
-                self.pseudo_label_train(mask=mask,pseudo_labels=new_pred_labels,num_epochs=num_pseudo_label_epochs,writer=writer,position_in_meta_loop=epoch_num)
+                mlp_preds = self.pseudo_label_train(mask=mask,pseudo_labels=new_pred_labels,num_epochs=num_pseudo_label_epochs,writer=writer,position_in_meta_loop=epoch_num)
             else:
-                self.pseudo_label_train(mask=mask,pseudo_labels=new_pred_labels,num_epochs=num_pseudo_label_epochs,writer=writer)
+                mlp_preds = self.pseudo_label_train(mask=mask,pseudo_labels=new_pred_labels,num_epochs=num_pseudo_label_epochs,writer=writer)
             print('translating labelling')
             print('pseudo label training')
-            counts = {selected_acts[item]:sum(new_pred_labels==item) for item in set(new_pred_labels)}
-            mask_counts = {selected_acts[item]:sum(new_pred_labels[mask]==item) for item in set(new_pred_labels[mask])}
+            counts = {selected_acts[int(item)]:sum(new_pred_labels==item) for item in set(new_pred_labels)}
+            mask_counts = {selected_acts[int(item)]:sum(new_pred_labels[mask]==item) for item in set(new_pred_labels[mask])}
             print('Counts:',counts)
             print('Masked Counts:',mask_counts)
-            print('Latent accuracy:', utils.accuracy(new_pred_labels,self.dset.y))
+            print('Latent accuracy:', utils.accuracy(new_pred_labels,np_gt_labels))
             print('Masked Latent accuracy:', utils.accuracy(new_pred_labels[mask],self.dset.y[mask]),mask.sum())
+            print('MLP accuracy:', utils.accuracy(mlp_preds,np_gt_labels))
             rand_idxs = np.array([15,1777,1982,9834,11243,25,7777,5982,5834,250,7717,5912,5134])
-            np_gt_labels = self.dset.y.detach().cpu().numpy().astype(int)
             for action_num in np.unique(np_gt_labels):
                 action_preds = new_pred_labels[np_gt_labels==action_num]
                 action_name = selected_acts[action_num]
@@ -306,7 +313,7 @@ def train(args,subj_ids):
     selected_acts = [action_name_dict[act_id] for act_id in selected_ids]
     num_windows = (len(x) - args.window_size)//args.step_size + 1
     mode_labels = np.concatenate([stats.mode(y[w*args.step_size:w*args.step_size + args.window_size]).mode for w in range(num_windows)])
-    mode_labels = utils.compress_labels(mode_labels)
+    mode_labels, _ ,_ = utils.compress_labels(mode_labels)
     assert len(selected_acts) == len(set(mode_labels))
     pprint(list(zip(selected_ids,selected_acts)))
     num_labels = len(set(mode_labels))
@@ -362,6 +369,7 @@ if __name__ == "__main__":
     parser.add_argument('--exp_name',type=str,default="")
     parser.add_argument('--load_pretrained',action='store_true')
     parser.add_argument('--mlp_lr',type=float,default=1e-3)
+    parser.add_argument('--no_umap',action='store_true')
     parser.add_argument('--noise',type=float,default=1.)
     parser.add_argument('--num_meta_epochs',type=int,default=30)
     parser.add_argument('--num_pre_epochs',type=int,default=5)
