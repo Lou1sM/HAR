@@ -14,13 +14,13 @@ import torch.nn as nn
 import numpy as np
 from torch.utils import data
 from torch.utils.tensorboard import SummaryWriter
-import clustering.src.utils as utils
+from dl_utils import misc, label_funcs, tensor_funcs
 import umap
 
 
 def display(latents_to_display):
     umapped_latents = umap.UMAP(min_dist=0,n_neighbors=30,n_components=2,random_state=42).fit_transform(latents_to_display.squeeze())
-    utils.scatter_clusters(umapped_latents,labels=None,show=True)
+    misc.scatter_clusters(umapped_latents,labels=None,show=True)
 
 class StepDataset(data.Dataset):
     def __init__(self,x,y,device,window_size,step_size,pl_training,transforms=[]):
@@ -140,7 +140,7 @@ class HARLearner():
             best_loss = np.inf
             for idx, (xb,yb,tb) in enumerate(self.dl):
                 latent = self.enc(xb)
-                latent = utils.noiseify(latent,ARGS.noise)
+                latent = tensor_funcs.noiseify(latent,ARGS.noise)
                 pred = self.dec(latent)
                 loss = self.rec_lf(pred,xb)
                 loss.backward()
@@ -179,7 +179,7 @@ class HARLearner():
             for batch_idx, (xb,yb,idx) in enumerate(pseudo_label_dl):
                 batch_mask = mask[idx]
                 latent = self.enc(xb)
-                latent = utils.noiseify(latent,ARGS.noise)
+                latent = tensor_funcs.noiseify(latent,ARGS.noise)
                 if batch_mask.any():
                     try:
                         pseudo_label_pred = self.mlp(latent[:,:,0,0])
@@ -213,10 +213,12 @@ class HARLearner():
                     epoch_rec_losses.append(rec_loss)
                 epoch_losses.append(loss)
                 if ARGS.test: break
+            if ARGS.test:
+                pred_array_ordered = label_funcs.dummy_labels(self.num_classes,len(self.dset))
+                break
             pred_array = np.concatenate(pred_list)
             idx_array = np.concatenate(idx_list)
             pred_array_ordered = np.array([item[0] for item in sorted(zip(pred_array,idx_array),key=lambda x:x[1])])
-            if ARGS.test: break
             if epoch_loss < best_loss:
                 best_loss = epoch_loss
                 count = 0
@@ -232,6 +234,7 @@ class HARLearner():
         old_pred_labels = -np.ones(self.dset.y.shape)
         plt.switch_backend('agg')
         np_gt_labels = self.dset.y.detach().cpu().numpy().astype(int)
+        super_mask = np.ones(len(self.dset))
         for epoch_num in range(num_meta_epochs):
             print('Meta Epoch:', epoch_num)
             if ARGS.test:
@@ -260,11 +263,11 @@ class HARLearner():
                 new_pred_probs = model.predict_proba(umapped_latents)
                 mask = new_pred_probs.max(axis=1) >= prob_thresh
                 fig = plt.figure()
-                utils.scatter_clusters(umapped_latents,self.dset.y,show=False)
+                misc.scatter_clusters(umapped_latents,self.dset.y,show=False)
                 writer.add_figure(f'umapped_latents/{epoch_num}',fig)
                 print('Prob_thresh mask:',sum(mask),sum(mask)/len(new_pred_labels))
                 if ARGS.save: np.save('test_umapped_latents.npy',umapped_latents)
-                new_pred_labels = utils.translate_labellings(new_pred_labels,np_gt_labels,subsample_size=30000)
+                new_pred_labels = label_funcs.translate_labellings(new_pred_labels,np_gt_labels,subsample_size=30000)
             if epoch_num > 0:
                 mask2 = new_pred_labels==old_pred_labels
                 print('Sames:', sum(mask2), sum(mask2)/len(new_pred_labels))
@@ -273,15 +276,17 @@ class HARLearner():
                 mlp_preds = self.pseudo_label_train(mask=mask,pseudo_labels=new_pred_labels,num_epochs=num_pseudo_label_epochs,writer=writer,position_in_meta_loop=epoch_num)
             else:
                 mlp_preds = self.pseudo_label_train(mask=mask,pseudo_labels=new_pred_labels,num_epochs=num_pseudo_label_epochs,writer=writer)
+            super_mask*=mask
             print('translating labelling')
             print('pseudo label training')
             counts = {selected_acts[int(item)]:sum(new_pred_labels==item) for item in set(new_pred_labels)}
             mask_counts = {selected_acts[int(item)]:sum(new_pred_labels[mask]==item) for item in set(new_pred_labels[mask])}
-            print('Counts:',counts)
-            print('Masked Counts:',mask_counts)
-            print('Latent accuracy:', utils.accuracy(new_pred_labels,np_gt_labels))
-            print('Masked Latent accuracy:', utils.accuracy(new_pred_labels[mask],self.dset.y[mask]),mask.sum())
-            print('MLP accuracy:', utils.accuracy(mlp_preds,np_gt_labels))
+            #print('Counts:',counts)
+            #print('Masked Counts:',mask_counts)
+            print('Latent accuracy:', label_funcs.accuracy(new_pred_labels,np_gt_labels))
+            print('Masked Latent accuracy:', label_funcs.accuracy(new_pred_labels[mask],self.dset.y[mask]),mask.sum())
+            print('Super Masked Latent accuracy:', label_funcs.accuracy(new_pred_labels[super_mask],self.dset.y[mask]),mask.sum())
+            print('MLP accuracy:', label_funcs.accuracy(mlp_preds,np_gt_labels))
             rand_idxs = np.array([15,1777,1982,9834,11243,25,7777,5982,5834,250,7717,5912,5134])
             for action_num in np.unique(np_gt_labels):
                 action_preds = new_pred_labels[np_gt_labels==action_num]
@@ -295,7 +300,7 @@ class HARLearner():
             old_pred_labels = copy.deepcopy(new_pred_labels)
         # Save models
         if ARGS.save:
-            utils.torch_save({'enc':self.enc,'dec':self.dec,'mlp':self.mlp},exp_dir,f'har_learner{ARGS.exp_name}.pt')
+            misc.torch_save({'enc':self.enc,'dec':self.dec,'mlp':self.mlp},exp_dir,f'har_learner{ARGS.exp_name}.pt')
             with open(os.path.join(exp_dir,f'HMM{ARGS.exp_name}.pkl', 'wb')) as f: pickle.dump(model,f)
 
 def train(args,subj_ids):
@@ -313,7 +318,7 @@ def train(args,subj_ids):
     selected_acts = [action_name_dict[act_id] for act_id in selected_ids]
     num_windows = (len(x) - args.window_size)//args.step_size + 1
     mode_labels = np.concatenate([stats.mode(y[w*args.step_size:w*args.step_size + args.window_size]).mode for w in range(num_windows)])
-    mode_labels, _ ,_ = utils.compress_labels(mode_labels)
+    mode_labels, _ ,_ = label_funcs.compress_labels(mode_labels)
     assert len(selected_acts) == len(set(mode_labels))
     pprint(list(zip(selected_ids,selected_acts)))
     num_labels = len(set(mode_labels))
@@ -378,7 +383,7 @@ if __name__ == "__main__":
     parser.add_argument('--prob_thresh',type=float,default=.95)
     parser.add_argument('--save','-s',action='store_true')
     parser.add_argument('--step_size',type=int,default=5)
-    parser.add_argument('--subj_ids',type=int,nargs='+',default=5)
+    parser.add_argument('--subj_ids',type=int,nargs='+',default=[101])
     parser.add_argument('--test','-t',action='store_true')
     parser.add_argument('--window_size',type=int,default=512)
     ARGS = parser.parse_args()
