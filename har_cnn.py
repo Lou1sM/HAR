@@ -234,7 +234,7 @@ class HARLearner():
         old_pred_labels = -np.ones(self.dset.y.shape)
         plt.switch_backend('agg')
         np_gt_labels = self.dset.y.detach().cpu().numpy().astype(int)
-        super_mask = np.ones(len(self.dset))
+        super_mask = np.ones(len(self.dset)).astype(np.bool)
         for epoch_num in range(num_meta_epochs):
             print('Meta Epoch:', epoch_num)
             if ARGS.test:
@@ -244,7 +244,7 @@ class HARLearner():
                 if additional > 0:
                     new_pred_labels = np.concatenate((new_pred_labels,np.ones(additional)))
                 new_pred_labels = new_pred_labels.astype(np.long)
-                mask = torch.ones(len(self.dset.y)).bool()
+                mask = np.ones(len(self.dset.y)).astype(np.bool)
                 old_pred_labels = new_pred_labels
             else:
                 latents = self.get_latents()
@@ -285,7 +285,7 @@ class HARLearner():
             #print('Masked Counts:',mask_counts)
             print('Latent accuracy:', label_funcs.accuracy(new_pred_labels,np_gt_labels))
             print('Masked Latent accuracy:', label_funcs.accuracy(new_pred_labels[mask],self.dset.y[mask]),mask.sum())
-            print('Super Masked Latent accuracy:', label_funcs.accuracy(new_pred_labels[super_mask],self.dset.y[mask]),mask.sum())
+            print('Super Masked Latent accuracy:', label_funcs.accuracy(new_pred_labels[super_mask],self.dset.y[super_mask]),super_mask.sum())
             print('MLP accuracy:', label_funcs.accuracy(mlp_preds,np_gt_labels))
             rand_idxs = np.array([15,1777,1982,9834,11243,25,7777,5982,5834,250,7717,5912,5134])
             for action_num in np.unique(np_gt_labels):
@@ -302,13 +302,14 @@ class HARLearner():
         if ARGS.save:
             misc.torch_save({'enc':self.enc,'dec':self.dec,'mlp':self.mlp},exp_dir,f'har_learner{ARGS.exp_name}.pt')
             with open(os.path.join(exp_dir,f'HMM{ARGS.exp_name}.pkl', 'wb')) as f: pickle.dump(model,f)
+        return new_pred_labels, mask, super_mask
 
 def train(args,subj_ids):
     # Make dataset
 
     action_name_dict = {1:'lying',2:'sitting',3:'standing',4:'walking',5:'running',6:'cycling',7:'Nordic walking',9:'watching TV',10:'computer work',11:'car driving',12:'ascending stairs',13:'descending stairs',16:'vacuum cleaning',17:'ironing',18:'folding laundry',19:'house cleaning',20:'playing soccer',24:'rope jumping'}
-    x = np.concatenate([np.load(f'PAMAP2_Dataset/np_data/subject{subj_id}.npy') for subj_id in subj_ids])
-    y = np.concatenate([np.load(f'PAMAP2_Dataset/np_data/subject{subj_id}_labels.npy') for subj_id in subj_ids])
+    x = np.concatenate([np.load(f'datasets/PAMAP2_Dataset/np_data/subject{subj_id}.npy') for subj_id in subj_ids])
+    y = np.concatenate([np.load(f'datasets/PAMAP2_Dataset/np_data/subject{subj_id}_labels.npy') for subj_id in subj_ids])
     x = x[y!=0]
     y = y[y!=0]
     xnans = np.isnan(x).any(axis=1)
