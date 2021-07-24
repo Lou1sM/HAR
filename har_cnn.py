@@ -14,7 +14,7 @@ import time
 from torch.utils import data
 from dl_utils.misc import asMinutes
 from dl_utils.label_funcs import accuracy, mean_f1, debable, translate_labellings, compress_labels, get_num_labels, label_counts, dummy_labels
-from dl_utils.tensor_funcs import noiseify
+from dl_utils.tensor_funcs import noiseify, numpyify
 from make_dsets import make_dset_train_val, make_dsets_by_user
 
 
@@ -266,32 +266,32 @@ class HARLearner():
         print(results_matrix)
         return results_matrix
 
-    def pseudo_label_train(self,pseudo_label_dset,mask,num_epochs):
+    def pseudo_label_train(self,pseudo_label_dset,mask,num_epochs,position_in_meta_loop=0):
         self.enc.train()
         pseudo_label_dl = data.DataLoader(pseudo_label_dset,batch_sampler=data.BatchSampler(data.RandomSampler(pseudo_label_dset),self.batch_size,drop_last=False),pin_memory=False)
-        for epoch in range(num_epochs):
-            epoch_loss = 0
-            best_loss = np.inf
+        rlmbda = 1 - (position_in_meta_loop/3)
+        noise = ARGS.noise*(1 - (position_in_meta_loop/3))
+        for epoch_num in range(num_epochs):
             pred_list = []
             idx_list = []
             for batch_idx, (xb,yb,idx) in enumerate(pseudo_label_dl):
                 batch_mask = mask[idx]
                 latent = self.enc(xb)
-                latent = noiseify(latent,ARGS.noise)
+                latent = noiseify(latent,noise)
                 if batch_mask.any():
                     try:
                         pseudo_label_pred = self.mlp(latent[:,:,0,0])
                     except ValueError: set_trace()
                     pseudo_label_loss = self.pseudo_label_lf(pseudo_label_pred[batch_mask],yb.long()[batch_mask])
                 else:
-                    pseudo_label_loss = torch.tensor(0,device=self.device)
+                    pseudo_label_loss = torch.tensor(0,device=xb.device)
                 if not batch_mask.all():
                     latents_to_rec_train = latent[~batch_mask]
                     rec_pred = self.dec(latents_to_rec_train)
                     rec_loss = self.rec_lf(rec_pred,xb[~batch_mask])/(~batch_mask).sum()
                 else:
-                    rec_loss = torch.tensor(0,device=pseudo_label_dset.device)
-                loss = pseudo_label_loss + rec_loss
+                    rec_loss = torch.tensor(0,device=xb.device)
+                loss = pseudo_label_loss + rlmbda*rec_loss
                 if math.isnan(loss): set_trace()
                 loss.backward()
                 self.enc_opt.step(); self.enc_opt.zero_grad()
@@ -299,22 +299,15 @@ class HARLearner():
                 self.mlp_opt.step(); self.mlp_opt.zero_grad()
                 pred_list.append(pseudo_label_pred.argmax(axis=1).detach().cpu().numpy())
                 idx_list.append(idx.detach().cpu().numpy())
-                if ARGS.test: break
             if ARGS.test:
                 pred_array_ordered = dummy_labels(self.num_classes,len(pseudo_label_dset))
                 break
             pred_array = np.concatenate(pred_list)
             idx_array = np.concatenate(idx_list)
             pred_array_ordered = np.array([item[0] for item in sorted(zip(pred_array,idx_array),key=lambda x:x[1])])
-            if epoch_loss < best_loss:
-                best_loss = epoch_loss
-                count = 0
-            else:
-                count += 1
-            if count > 4: break
         return pred_array_ordered
 
-    def pseudo_label_cluster_meta_loop(self,dset,num_meta_epochs,num_pseudo_label_epochs,prob_thresh,selected_acts):
+    def pseudo_label_cluster_meta_loop(self,dset,meta_pivot_pred_labels,num_meta_epochs,num_pseudo_label_epochs,prob_thresh,selected_acts):
         old_pred_labels = -np.ones(dset.y.shape)
         np_gt_labels = dset.y.detach().cpu().numpy().astype(int)
         super_mask = np.ones(len(dset)).astype(np.bool)
@@ -347,37 +340,89 @@ class HARLearner():
                 mask = new_pred_probs.max(axis=1) >= prob_thresh
                 print('Prob_thresh mask:',sum(mask),sum(mask)/len(new_pred_labels))
                 if ARGS.save: np.save('test_umapped_latents.npy',umapped_latents)
-                new_pred_labels = translate_labellings(new_pred_labels,np_gt_labels,subsample_size=30000)
+                if meta_pivot_pred_labels is not 'none':
+                    new_pred_labels = translate_labellings(new_pred_labels,meta_pivot_pred_labels,subsample_size=30000)
+                elif epoch_num >0:
+                    new_pred_labels = translate_labellings(new_pred_labels,old_pred_labels,subsample_size=30000)
+            pseudo_label_dset = deepcopy(dset)
+            pseudo_label_dset.y = cudify(new_pred_labels)
             if epoch_num > 0:
                 mask2 = new_pred_labels==old_pred_labels
                 print('Sames:', sum(mask2), sum(mask2)/len(new_pred_labels))
                 mask = mask*mask2
                 assert (new_pred_labels[mask]==old_pred_labels[mask]).all()
-            pseudo_label_dset = deepcopy(dset)
-            pseudo_label_dset.y = cudify(new_pred_labels)
-            mlp_preds = self.pseudo_label_train(pseudo_label_dset,mask,num_pseudo_label_epochs)
+                mlp_preds = self.pseudo_label_train(pseudo_label_dset,mask=mask,num_epochs=num_pseudo_label_epochs,position_in_meta_loop=epoch_num)
+            else:
+                mlp_preds = self.pseudo_label_train(pseudo_label_dset,mask=mask,num_epochs=num_pseudo_label_epochs)
             super_mask*=mask
             print('translating labelling')
             print('pseudo label training')
-            #print('Counts:',label_counts(new_pred_labels))
-            #print('Masked Counts:',label_counts(new_pred_labels[mask]))
-            print('Super Masked Counts:',label_counts(new_pred_labels[super_mask]))
+            counts = {selected_acts[int(item)]:sum(new_pred_labels==item) for item in set(new_pred_labels)}
+            mask_counts = {selected_acts[int(item)]:sum(new_pred_labels[mask]==item) for item in set(new_pred_labels[mask])}
+            #print('Counts:',counts)
+            y_np = numpyify(dset.y)
+            print('Masked Counts:',mask_counts)
+            print('Super Masked Counts:',label_counts(y_np[super_mask]))
             print('Latent accuracy:', accuracy(new_pred_labels,np_gt_labels))
             print('Masked Latent accuracy:', accuracy(new_pred_labels[mask],dset.y[mask]),mask.sum())
             print('Super Masked Latent accuracy:', accuracy(new_pred_labels[super_mask],dset.y[super_mask]),super_mask.sum())
             print('MLP accuracy:', accuracy(mlp_preds,np_gt_labels))
             rand_idxs = np.array([15,1777,1982,9834,11243,25,7777,5982,5834,250,7717,5912,5134])
-            #for action_num in np.unique(np_gt_labels):
-            #    action_preds = new_pred_labels[np_gt_labels==action_num]
-            #    action_name = selected_acts[action_num]
-            #    num_correct = (action_preds==action_num).sum()
-            #    total_num = len(action_preds)
-            #    print(f"{action_name}: {round(num_correct/total_num,3)} ({num_correct}/{total_num})")
-            #print('GT:',dset.y[rand_idxs].int().tolist())
-            #print('Old:',old_pred_labels[rand_idxs])
-            #print('New:',new_pred_labels[rand_idxs])
+            preds_for_printing = translate_labellings(new_pred_labels,np_gt_labels,'none')
+            for action_num in np.unique(np_gt_labels):
+                action_preds = preds_for_printing[np_gt_labels==action_num]
+                action_name = selected_acts[action_num]
+                num_correct = (action_preds==action_num).sum()
+                total_num = len(action_preds)
+                print(f"{action_name}: {round(num_correct/total_num,3)} ({num_correct}/{total_num})")
+            print('GT:',dset.y[rand_idxs].int().tolist())
+            print('Old:',old_pred_labels[rand_idxs])
+            print('New:',new_pred_labels[rand_idxs])
             old_pred_labels = deepcopy(new_pred_labels)
         return new_pred_labels, mask, super_mask
+
+
+    def pseudo_label_cluster_meta_meta_loop(self,dset,num_meta_meta_epochs,num_meta_epochs,num_pseudo_label_epochs,prob_thresh,selected_acts):
+
+        y_np = numpyify(dset.y)
+        combined_super_mask_preds = -np.ones(len(dset))
+        combined_mask_preds = -np.ones(len(dset))
+        best_preds_so_far = -np.ones(len(dset))
+        got_by_super_masks = np.zeros(len(dset)).astype(np.bool)
+        got_by_masks = np.zeros(len(dset)).astype(np.bool)
+
+        preds_histories = []
+        super_mask_histories = []
+        mask_histories = []
+
+        for meta_meta_epoch in range(num_meta_meta_epochs):
+            meta_pivot_pred_labels = best_preds_so_far if meta_meta_epoch > 0 else 'none'
+            preds, mask, super_mask = self.pseudo_label_cluster_meta_loop(dset,meta_pivot_pred_labels, num_meta_epochs=num_meta_epochs,num_pseudo_label_epochs=num_pseudo_label_epochs,prob_thresh=prob_thresh,selected_acts=selected_acts)
+            preds_histories.append(preds)
+            super_mask_histories.append(super_mask)
+            mask_histories.append(mask)
+            got_by_super_masks = np.logical_or(got_by_super_masks,super_mask)
+            got_by_masks = np.logical_or(got_by_masks,mask)
+            combined_super_mask_preds[super_mask] = preds[super_mask]
+            combined_mask_preds[mask] = preds[mask]
+            if meta_meta_epoch == 0: best_preds_so_far = preds
+            best_preds_so_far[got_by_masks] = combined_mask_preds[got_by_masks]
+            best_preds_so_far[got_by_super_masks] = combined_super_mask_preds[got_by_super_masks]
+            print('Acc of best so far', accuracy(best_preds_so_far,y_np))
+
+        print(f"Accuracy on just the masks: {accuracy(combined_mask_preds,y_np)}")
+        print(f"Masks masked: {accuracy(combined_mask_preds[got_by_masks],y_np[got_by_masks])}, and full: {accuracy(combined_mask_preds,y_np)}")
+        print(f"Label counts for just the masks: {label_counts(combined_mask_preds)}")
+        print(f"Label counts missed by masks: {label_counts(y_np[~got_by_masks])}")
+        combined_mask_preds[~got_by_masks] = preds[~got_by_masks]
+        print(f"Accuracy with gaps filled by preds: {accuracy(combined_mask_preds,y_np)}")
+
+        print(f"Super masks masked: {accuracy(combined_super_mask_preds[got_by_super_masks],y_np[got_by_super_masks])}, and full: {accuracy(combined_super_mask_preds,y_np)}")
+        print(f"Label counts for just the super masks: {label_counts(combined_super_mask_preds)}")
+        print(f"Label counts missed by super masks: {label_counts(y_np[~got_by_super_masks])}")
+        combined_super_mask_preds[~got_by_super_masks] = combined_mask_preds[~got_by_super_masks]
+        print(f"Accuracy with gaps filled by mask preds and preds: {accuracy(combined_super_mask_preds,y_np)}")
+        print(accuracy(best_preds_so_far,y_np))
 
     def full_train(self,user_dsets,args):
         preds_from_users_list = []
@@ -471,13 +516,15 @@ def main(args,subj_ids):
     train_start_time = time.time()
     dsets_by_id = make_dsets_by_user(args,subj_ids)
     bad_ids = []
-    for user_id, (dset,sa) in dsets_by_id.items():
-        n = get_num_labels(dset.y)
-        if n < num_labels/2:
-            print(f"Excluding user {user_id}, only has {n} different labels, instead of {num_labels}")
-            bad_ids.append(user_id)
-    dsets_by_id = [v for k,v in dsets_by_id.items() if k not in bad_ids]
-    har.full_train(dsets_by_id,args)
+    #for user_id, (dset,sa) in dsets_by_id.items():
+    #    n = get_num_labels(dset.y)
+    #    if n < num_labels/2:
+    #        print(f"Excluding user {user_id}, only has {n} different labels, instead of {num_labels}")
+    #        bad_ids.append(user_id)
+    #dsets_by_id = [v for k,v in dsets_by_id.items() if k not in bad_ids]
+    #har.full_train(dsets_by_id,args)
+    dset, selected_acts = list(dsets_by_id.values())[0]
+    har.pseudo_label_cluster_meta_meta_loop(dset,args.num_meta_meta_epochs,args.num_meta_epochs,args.num_pseudo_label_epochs,args.prob_thresh,selected_acts)
     train_end_time = time.time()
     total_prep_time = asMinutes(train_start_time-prep_start_time)
     total_train_time = asMinutes(train_end_time-train_start_time)
@@ -506,6 +553,8 @@ if __name__ == "__main__":
     parser.add_argument('--mlp_lr',type=float,default=1e-3)
     parser.add_argument('--noise',type=float,default=1.)
     parser.add_argument('--num_epochs',type=int,default=30)
+    parser.add_argument('--num_meta_epochs',type=int,default=4)
+    parser.add_argument('--num_meta_meta_epochs',type=int,default=4)
     parser.add_argument('--num_pseudo_label_epochs',type=int,default=3)
     parser.add_argument('--num_cluster_epochs',type=int,default=5)
     parser.add_argument('--parallel',action='store_true')
@@ -525,6 +574,7 @@ if __name__ == "__main__":
         print("Shouldn't be saving for a test run"); sys.exit()
     if ARGS.test:
         ARGS.num_meta_epochs = 2
+        ARGS.num_meta_meta_epochs = 2
         ARGS.num_cluster_epochs = 2
         ARGS.num_pseudo_label_epochs = 2
     elif not ARGS.no_umap: import umap
