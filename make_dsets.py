@@ -4,6 +4,17 @@ from scipy import stats
 from torch.utils import data
 from dl_utils import label_funcs
 
+class ChunkDataset(data.Dataset):
+    def __init__(self,x,y,device):
+        self.device=device
+        self.x, self.y = x,y
+        self.x, self.y = self.x.to(self.device),self.y.to(self.device)
+    def __len__(self): return len(self.x)
+    def __getitem__(self,idx):
+        batch_x = self.x[idx].unsqueeze(0)
+        batch_y = self.y[idx]
+        return batch_x, batch_y, idx
+
 class StepDataset(data.Dataset):
     def __init__(self,x,y,device,window_size,step_size,transforms=[]):
         self.device=device
