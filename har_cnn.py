@@ -11,7 +11,7 @@ import torch.nn as nn
 import numpy as np
 import time
 from torch.utils import data
-from dl_utils.misc import asMinutes
+from dl_utils.misc import asMinutes, np_save
 from dl_utils.label_funcs import accuracy, mean_f1, debable, translate_labellings, compress_labels, get_num_labels, label_counts, dummy_labels, unique_labels, get_trans_dict
 from dl_utils.tensor_funcs import noiseify, numpyify
 from make_dsets import make_dset_train_val, make_dsets_by_user, ChunkDataset
@@ -88,7 +88,7 @@ class HARLearner():
         self.dec = dec
         self.mlp = mlp
         self.pseudo_label_lf = nn.CrossEntropyLoss(reduction='none')
-        self.rec_lf = nn.MSELoss()
+        self.rec_lf = nn.MSELoss(reduction='none')
 
         self.enc_opt = torch.optim.Adam(self.enc.parameters(),lr=ARGS.enc_lr)
         self.dec_opt = torch.optim.Adam(self.dec.parameters(),lr=ARGS.dec_lr)
@@ -105,7 +105,7 @@ class HARLearner():
         collected_latents = np.concatenate(collected_latents,axis=0)
         return collected_latents
 
-    def train_on(self,dset,num_epochs,multiplicative_mask='none',lf=None,compute_acc=True,reinit=True,rlmbda=0):
+    def train_on(self,dset,num_epochs,multiplicative_mask='none',lf=None,compute_acc=True,reinit=True,rlmbda=0,custom_sampler='none'):
         if reinit: self.reinit_nets()
         self.enc.train()
         self.dec.train()
@@ -114,7 +114,8 @@ class HARLearner():
         best_acc = 0
         best_f1 = 0
         best_pred_array_ordered = -np.ones(len(dset.y))
-        dl = data.DataLoader(dset,batch_sampler=data.BatchSampler(data.RandomSampler(dset),self.batch_size,drop_last=False),pin_memory=False)
+        sampler = data.RandomSampler(dset) if custom_sampler is 'none' else custom_sampler
+        dl = data.DataLoader(dset,batch_sampler=data.BatchSampler(sampler,self.batch_size,drop_last=False),pin_memory=False)
         for epoch in range(num_epochs):
             pred_list = []
             idx_list = []
@@ -130,19 +131,19 @@ class HARLearner():
                 else: loss = label_loss.mean()
                 if math.isnan(loss): set_trace()
                 if rlmbda>0:
-                    rec_loss = self.rec_lf(self.dec(latent),xb)
+                    rec_loss = self.rec_lf(self.dec(latent),xb).mean()
                     loss += rec_loss
                 loss.backward()
                 self.enc_opt.step(); self.enc_opt.zero_grad()
-                self.dec_opt.step(); self.dec_opt.zero_grad()
                 self.mlp_opt.step(); self.mlp_opt.zero_grad()
+                if rlmbda>0: self.dec_opt.step(); self.dec_opt.zero_grad()
                 conf,pred = label_pred.max(axis=1)
                 pred_list.append(numpyify(pred))
                 conf_list.append(numpyify(conf))
                 idx_list.append(idx.detach().cpu().numpy())
                 if ARGS.test: break
             if ARGS.test:
-                return -1, -1, dummy_labels(self.num_classes,len(dset.y))
+                return -1, -1, dummy_labels(self.num_classes,len(dset.y)), np.ones(len(dset))
             pred_array = np.concatenate(pred_list)
             idx_array = np.concatenate(idx_list)
             conf_array = np.concatenate(conf_list)
@@ -151,6 +152,9 @@ class HARLearner():
             if compute_acc:
                 acc = -1 if ARGS.test else accuracy(pred_array_ordered,dset.y.detach().cpu().numpy())
                 f1 = -1 if ARGS.test else mean_f1(pred_array_ordered,dset.y.detach().cpu().numpy())
+                print(acc)
+                m = numpyify(multiplicative_mask.bool())
+                print(accuracy(pred_array_ordered[m],dset.y.detach().cpu().numpy()[m]))
                 if ARGS.test or acc > best_acc:
                     best_pred_array_ordered = pred_array_ordered
                     best_conf_array_ordered = conf_array_ordered
@@ -287,14 +291,14 @@ class HARLearner():
                     try:
                         pseudo_label_pred = self.mlp(latent[:,:,0,0])
                     except ValueError: set_trace()
-                    loss = self.pseudo_label_lf(pseudo_label_pred[batch_mask],yb.long()[batch_mask]).mean()
+                    loss = (self.pseudo_label_lf(pseudo_label_pred,yb)*batch_mask).mean()
                 else:
                     loss = torch.tensor(0,device=xb.device)
-                if not batch_mask.all() and rlmbda > 0:
-                    latents_to_rec_train = latent[~batch_mask]
-                    rec_pred = self.dec(latents_to_rec_train)
-                    rec_loss = self.rec_lf(rec_pred,xb[~batch_mask])/(~batch_mask).sum()
-                    loss += rlmbda*rec_loss
+                #if not batch_mask.all() and rlmbda > 0:
+                latents_to_rec_train = latent
+                rec_pred = self.dec(latents_to_rec_train)
+                rec_loss = (self.rec_lf(rec_pred,xb).mean((1,2,3))*(1-batch_mask)).mean()
+                loss += rlmbda*rec_loss
                 if math.isnan(loss): set_trace()
                 loss.backward()
                 self.enc_opt.step(); self.enc_opt.zero_grad()
@@ -351,10 +355,9 @@ class HARLearner():
                 mask2 = new_pred_labels==old_pred_labels
                 mask = mask*mask2
                 assert (new_pred_labels[mask]==old_pred_labels[mask]).all()
-                mlp_preds = self.pseudo_label_train(pseudo_label_dset,mask=mask,num_epochs=num_pseudo_label_epochs,position_in_meta_loop=epoch_num)
-            else:
-                mlp_preds = self.pseudo_label_train(pseudo_label_dset,mask=mask,num_epochs=num_pseudo_label_epochs)
             super_mask*=mask
+            mask_to_use = (mask+super_mask)/2
+            mlp_preds = self.pseudo_label_train(pseudo_label_dset,mask=cudify(mask_to_use),num_epochs=num_pseudo_label_epochs,position_in_meta_loop=epoch_num)
             #print('translating labelling')
             #print('pseudo label training')
             #counts = {selected_acts[int(item)]:sum(new_pred_labels==item) for item in set(new_pred_labels)}
@@ -381,34 +384,42 @@ class HARLearner():
             #print('Old:',old_pred_labels[rand_idxs])
             #print('New:',new_pred_labels[rand_idxs])
             old_pred_labels = deepcopy(new_pred_labels)
-        return mlp_preds, mask, super_mask
-
+        super_super_mask = np.logical_and(super_mask,new_pred_labels==mlp_preds)
+        return new_pred_labels, mask, super_mask, super_super_mask
 
     def pseudo_label_cluster_meta_meta_loop(self,dset,num_meta_meta_epochs,num_meta_epochs,num_pseudo_label_epochs,prob_thresh,selected_acts):
         y_np = numpyify(dset.y)
         combined_super_mask_preds = -np.ones(len(dset))
+        combined_super_super_mask_preds = -np.ones(len(dset))
         combined_mask_preds = -np.ones(len(dset))
         best_preds_so_far = -np.ones(len(dset))
         got_by_super_masks = np.zeros(len(dset)).astype(np.bool)
+        got_by_super_super_masks = np.zeros(len(dset)).astype(np.bool)
         got_by_masks = np.zeros(len(dset)).astype(np.bool)
 
         preds_histories = []
+        super_super_mask_histories = []
         super_mask_histories = []
         mask_histories = []
 
         for meta_meta_epoch in range(num_meta_meta_epochs):
+            print('\nMETA META EPOCH:', meta_meta_epoch)
             meta_pivot_pred_labels = best_preds_so_far if meta_meta_epoch > 0 else 'none'
-            preds, mask, super_mask = self.pseudo_label_cluster_meta_loop(dset,meta_pivot_pred_labels, num_meta_epochs=num_meta_epochs,num_pseudo_label_epochs=num_pseudo_label_epochs,prob_thresh=prob_thresh,selected_acts=selected_acts)
+            preds, mask, super_mask, super_super_mask = self.pseudo_label_cluster_meta_loop(dset,meta_pivot_pred_labels, num_meta_epochs=num_meta_epochs,num_pseudo_label_epochs=num_pseudo_label_epochs,prob_thresh=prob_thresh,selected_acts=selected_acts)
             preds_histories.append(preds)
             super_mask_histories.append(super_mask)
+            super_super_mask_histories.append(super_super_mask)
             mask_histories.append(mask)
             got_by_super_masks = np.logical_or(got_by_super_masks,super_mask)
+            got_by_super_super_masks = np.logical_or(got_by_super_super_masks,super_super_mask)
             got_by_masks = np.logical_or(got_by_masks,mask)
             combined_super_mask_preds[super_mask] = preds[super_mask]
+            combined_super_super_mask_preds[super_super_mask] = preds[super_super_mask]
             combined_mask_preds[mask] = preds[mask]
             if meta_meta_epoch == 0: best_preds_so_far = preds
             best_preds_so_far[got_by_masks] = combined_mask_preds[got_by_masks]
             best_preds_so_far[got_by_super_masks] = combined_super_mask_preds[got_by_super_masks]
+            best_preds_so_far[got_by_super_super_masks] = combined_super_super_mask_preds[got_by_super_super_masks]
             print('Acc of best so far', accuracy(best_preds_so_far,y_np))
 
         surely_correct = np.stack(super_mask_histories).all(axis=0)
@@ -426,7 +437,16 @@ class HARLearner():
         combined_super_mask_preds[~got_by_super_masks] = combined_mask_preds[~got_by_super_masks]
         print(f"Accuracy with gaps filled by mask preds and preds: {accuracy(combined_super_mask_preds,y_np)}")
         print(accuracy(best_preds_so_far,y_np))
+        set_trace()
         print(f"Surely corrects: {macc(surely_correct)}")
+        print(acc_by_label(best_preds_so_far[surely_correct],y_np[surely_correct]))
+        if ARGS.save:
+            np_save('super_super_mask_histories.npy',np.stack(super_super_mask_histories))
+            np_save('super_mask_histories.npy',np.stack(super_mask_histories))
+            np_save('mask_histories.npy',np.stack(mask_histories))
+            np_save('preds_histories.npy',np.stack(preds_histories))
+
+        #return pseudo_labels_to_use, mask_to_use
 
     def full_train(self,user_dsets,args):
         preds_from_users_list = []
@@ -451,71 +471,76 @@ class HARLearner():
         print(f"Total acc: {weighted_sum_acc}")
 
     def load_and_find_hard_classes(self,dset,args):
-        super_mask_histories = np.load('super_masks.npy')
-        mask_histories = np.load('masks.npy')
-        preds_histories = np.load('preds.npy')
-        surely_correct = np.stack(super_mask_histories).all(axis=0)
-        preds = preds_histories[0]
-        print((preds[surely_correct] == preds[surely_correct]).all())
+        super_super_mask_histories = np.stack(np.load('super_super_masks.npy'))
+        preds_histories = np.stack(np.load('preds.npy'))
+        masked_mode_preds = masked_mode(preds_histories,super_super_mask_histories)
+        got_by_super_super_masks = super_super_mask_histories.any(axis=0)
         y_np = numpyify(dset.y).astype(int)
-        macc = lambda mask: accuracy(preds[mask],y_np[mask])
-        labels_with_enough_preds = [k for k,v in label_counts(preds[surely_correct]).items() if v >= 50]
+        labels_with_enough_preds = unique_labels(masked_mode_preds[got_by_super_super_masks])
         labels_without_enough_preds = [k for k in unique_labels(y_np) if k not in labels_with_enough_preds]
-        if labels_without_enough_preds != []:
-            small_label_mask = recursive_np_or([preds==lab for lab in labels_without_enough_preds])
-            surely_correct = np.logical_and(surely_correct,~small_label_mask)
-        simplified_labels = -np.ones(len(dset)).astype(int)
-        simplified_labels[surely_correct] = preds[surely_correct]
-        simplified_labels, compress_dict1, changed = compress_labels(simplified_labels)
-        catch_all_label = len(set(labels_with_enough_preds))
-        likely_hard_class = np.zeros(len(dset)).astype(np.bool)
-        for hard_class in labels_without_enough_preds:
-            class_mask = preds==hard_class
-            likely_hard_class = np.logical_or(likely_hard_class,class_mask)
-            print(class_mask.sum(), 'dpoints for', hard_class)
-
+        simplified_labels, compress_dict1, changed = compress_labels(masked_mode_preds)
+        catch_all_label = get_num_labels(masked_mode_preds[got_by_super_super_masks])
         assert catch_all_label not in labels_with_enough_preds and catch_all_label-1 in unique_labels(simplified_labels)
+
+        likely_hard_class_histories = np.zeros(len(dset)).astype(np.bool)
+        for hard_class in labels_without_enough_preds:
+            class_mask = masked_mode_preds==hard_class
+            likely_hard_class_histories = np.logical_or(likely_hard_class_histories,class_mask)
+        likely_hard_class = likely_hard_class_histories.all(axis=0)
+
         simplified_labels[likely_hard_class] = catch_all_label
-        train_mask = np.logical_or(surely_correct,likely_hard_class).astype(float)
+        train_mask = np.logical_or(got_by_super_super_masks,likely_hard_class).astype(float)
         not_to_be_trained_on = simplified_labels==-1
         simplified_labels[not_to_be_trained_on] = catch_all_label # Can't have -1's when training, these points will be masked out anyway
         pseudo_label_dset = deepcopy(dset)
         pseudo_label_dset.y = cudify(simplified_labels)
         gt_trans_dict = {}
+
         tmp_label = max(y_np) + 1
         assert ~(y_np==tmp_label).any() and (y_np==(tmp_label-1)).any()
         for lab in unique_labels(y_np): # Keep labels the same in surely correct, others will be changed to catch_all
-            if lab in unique_labels(y_np[surely_correct]): gt_trans_dict[lab] = lab
+            if lab in unique_labels(y_np[got_by_super_super_masks]): gt_trans_dict[lab] = lab
             else: gt_trans_dict[lab] = tmp_label
         simplified_gt = np.array([gt_trans_dict[lab] for lab in y_np])
         simplified_gt, compress_dict, changed = compress_labels(simplified_gt)
-        assert compress_dict[tmp_label] == catch_all_label
-        x, _ = get_trans_dict(preds[surely_correct],y_np[surely_correct],'none')
-        x1, _ = get_trans_dict(simplified_labels[surely_correct],simplified_gt[surely_correct],'none')
-        for lab in unique_labels(preds[surely_correct]): x1[compress_dict1[lab]], compress_dict[x[lab]]
+        if compress_dict[tmp_label] != catch_all_label:
+            print(f"Warning: the preds contain {catch_all_label} unique labels, but the corresponding gts, only {compress_dict[tmp_label]}")
+            compress_dict[tmp_label] = catch_all_label
+
+        x, _ = get_trans_dict(masked_mode_preds[got_by_super_super_masks],y_np[got_by_super_super_masks],'none')
+        x1, _ = get_trans_dict(simplified_labels[got_by_super_super_masks],simplified_gt[got_by_super_super_masks],'none')
+        for lab in unique_labels(masked_mode_preds[got_by_super_super_masks]): x1[compress_dict1[lab]], compress_dict[x[lab]]
         num_conf_labels = len(labels_with_enough_preds)
-        descale_catch_all_label_by = 100*likely_hard_class.sum()*num_conf_labels/surely_correct.sum()
+        descale_catch_all_label_by = 100*likely_hard_class.sum()*num_conf_labels/got_by_super_super_masks.sum()
+        train_mask[likely_hard_class] /= descale_catch_all_label_by
+        assert (train_mask[np.logical_and(simplified_labels==catch_all_label,~not_to_be_trained_on)] == 1/descale_catch_all_label_by).all()
         self.mlp = Var_BS_MLP(32,25,num_conf_labels+1).cuda() # Plus one is for the catch_all_label
         self.mlp_opt = torch.optim.Adam(self.mlp.parameters(),lr=ARGS.mlp_lr)
-        train_mask[likely_hard_class] /= descale_catch_all_label_by
-        #train_mask[likely_hard_class] = 0
-        assert (train_mask[np.logical_and(simplified_labels==5,~not_to_be_trained_on)] == 1/descale_catch_all_label_by).all()
         acc, f1, train_preds, train_confs = self.train_on(pseudo_label_dset,args.num_pseudo_label_epochs,multiplicative_mask=cudify(train_mask),rlmbda=0)
         print(acc_by_label(train_preds,simplified_gt))
-        print(label_counts(simplified_gt[train_preds==5]))
+        print(label_counts(simplified_gt[train_preds==catch_all_label]))
         v_likely_hard_class = train_preds == 5
         vv_likely_hard_class = v_likely_hard_class
         thresh = 0
         set_trace()
+        # Select the most confident half of those assigned to catch_all_label
         while vv_likely_hard_class.sum() > len(dset)*len(labels_without_enough_preds)/(self.num_classes*2):
             thresh += 0.1
             vv_likely_hard_class = np.logical_and(v_likely_hard_class,train_confs>thresh)
         np.save('vv_likely_hard_class.npy',vv_likely_hard_class)
         print(acc,f1)
 
+def masked_mode(pred_array,mask):
+    x = mask.any(axis=0)
+    return np.array([stats.mode([lab for lab,b in zip(pred_array[:,j],mask[:,j]) if b]).mode[0] if bx else -1 for bx,j in zip(x,range(pred_array.shape[1]))])
+
 def recursive_np_or(boolean_arrays):
     if len(boolean_arrays) == 1: return boolean_arrays[0]
     return np.logical_or(boolean_arrays[0],recursive_np_or(boolean_arrays[1:]))
+
+def recursive_np_and(boolean_arrays):
+    if len(boolean_arrays) == 1: return boolean_arrays[0]
+    return np.logical_and(boolean_arrays[0],recursive_np_and(boolean_arrays[1:]))
 
 def acc_by_label(labels1, labels2, subsample_size='none'):
     labels1 = translate_labellings(labels1,labels2,subsample_size)
@@ -524,7 +549,7 @@ def acc_by_label(labels1, labels2, subsample_size='none'):
         label_preds = labels2[labels1==label]
         num_correct = (label_preds==label).sum()
         total_num = len(label_preds)
-        acc_by_labels_from[label] = num_correct/total_num
+        acc_by_labels_from[label] = round(num_correct/total_num,4)
     acc_by_labels_to = {}
     for label in np.unique(labels2):
         label_preds = labels1[labels2==label]
@@ -533,6 +558,8 @@ def acc_by_label(labels1, labels2, subsample_size='none'):
         acc_by_labels_to[label] = round(num_correct/total_num,4)
     return acc_by_labels_from, acc_by_labels_to
 
+def select_by_label(labelling,labels_to_select_by):
+    return recursive_np_or([labelling==lab for lab in labels_to_select_by])
 
 def true_cross_entropy_with_logits(pred,target):
     return (-(pred*target).sum(dim=1) + torch.logsumexp(pred,dim=1)).mean()
@@ -601,8 +628,8 @@ def main(args,subj_ids):
     exp_dir = os.path.join(f'experiments/{args.exp_name}')
 
     train_start_time = time.time()
-    dsets_by_id = make_dsets_by_user(args,subj_ids)
-    bad_ids = []
+    #dsets_by_id = make_dsets_by_user(args,subj_ids)
+    #bad_ids = []
     #for user_id, (dset,sa) in dsets_by_id.items():
     #    n = get_num_labels(dset.y)
     #    if n < num_labels/2:
@@ -610,25 +637,48 @@ def main(args,subj_ids):
     #        bad_ids.append(user_id)
     #dsets_by_id = [v for k,v in dsets_by_id.items() if k not in bad_ids]
     #har.full_train(dsets_by_id,args)
-    #har.pseudo_label_cluster_meta_meta_loop(dset,args.num_meta_meta_epochs,args.num_meta_epochs,args.num_pseudo_label_epochs,args.prob_thresh,selected_acts)
 
     #dset, selected_acts = list(dsets_by_id.values())[0]
     #har.load_and_train(dset,args)
 
-    dset, selected_acts = list(dsets_by_id.values())[0]
-    super_mask_histories = np.load('super_masks.npy')
-    preds_histories = np.load('preds.npy')
-    surely_correct = np.stack(super_mask_histories).all(axis=0)
-    num_already_taken_care_of = get_num_labels(preds_histories[0][surely_correct])
-    vv_likely_hard_class = np.load('vv_likely_hard_class.npy')
-    x_np = numpyify(dset.x)
-    x_chunks=np.stack([x_np[i*args.step_size:(i*args.step_size) + args.window_size] for i,b in enumerate(vv_likely_hard_class) if b])
-    tdset = ChunkDataset(cudify(x_chunks),cudify(numpyify(dset.y)[vv_likely_hard_class]),'cuda')
-    mlp = Var_BS_MLP(32,25,num_labels)
-    num_hard_classes = num_labels - num_already_taken_care_of
-    mlp = Var_BS_MLP(32,25,num_hard_classes).cuda()
-    sub_har_learner = HARLearner(enc=enc,dec=dec,mlp=mlp,batch_size=args.batch_size,num_classes=num_hard_classes)
-    sub_har_learner.pseudo_label_cluster_meta_meta_loop(tdset,args.num_meta_meta_epochs,args.num_meta_epochs,args.num_pseudo_label_epochs,args.prob_thresh,selected_acts)
+    dset_train, dset_val, selected_acts = make_dset_train_val(args,subj_ids)
+    if args.load_and_try:
+        mask = np.load('super_masks.npy').any(axis=0)
+        pseudo_labels = np.load('try_pseudo_labels.npy')
+        pseudo_label_dset = deepcopy(dset_train)
+        pseudo_labels[~mask] = 3 # Can't have -1's in loss function, these dps will be masked out anyway
+        pseudo_label_dset.y = cudify(pseudo_labels)
+        pseudo_label_counts = label_counts(pseudo_labels)
+        class_counts_per_dp = np.array(list(pseudo_label_counts[t] for t in pseudo_labels))
+        class_weights = 1./class_counts_per_dp
+        print(class_weights)
+        sampler = data.WeightedRandomSampler(class_weights,len(class_weights))
+        train_acc, train_f1, train_preds, train_confs = har.train_on(pseudo_label_dset,multiplicative_mask=cudify(mask).int(),num_epochs=10,custom_sampler=sampler)
+        print(train_acc,train_f1)
+        val_acc, val_f1, val_preds = har.val_on(dset_val)
+        print(val_acc,val_f1)
+        facc,ff1,fpreds,fconfs = har.train_with_fract_gts_on(dset_train,10,0.1)
+        print(f"acc with frac gts:{facc}")
+        set_trace()
+    elif args.load_and_find:
+        har.load_and_find_hard_classes(dset_train,args)
+    elif args.sub_train:
+        super_mask_histories = np.load('super_masks.npy')
+        preds_histories = np.load('preds.npy')
+        surely_correct = np.stack(super_mask_histories).all(axis=0)
+        masked_mode_labels = masked_mode(preds_histories,super_mask_histories)
+        num_already_taken_care_of = get_num_labels(preds_histories[0][surely_correct])
+        vv_likely_hard_class = np.load('vv_likely_hard_class.npy')
+        x_np = numpyify(dset_train.x)
+        x_chunks=np.stack([x_np[i*args.step_size:(i*args.step_size) + args.window_size] for i,b in enumerate(vv_likely_hard_class) if b])
+        tdset = ChunkDataset(cudify(x_chunks),cudify(numpyify(dset_train.y)[vv_likely_hard_class]),'cuda')
+        mlp = Var_BS_MLP(32,25,num_labels)
+        num_hard_classes = num_labels - num_already_taken_care_of
+        mlp = Var_BS_MLP(32,25,num_hard_classes).cuda()
+        sub_har_learner = HARLearner(enc=enc,dec=dec,mlp=mlp,batch_size=args.batch_size,num_classes=num_hard_classes)
+        sub_har_learner.pseudo_label_cluster_meta_meta_loop(tdset,args.num_meta_meta_epochs,args.num_meta_epochs,args.num_pseudo_label_epochs,args.prob_thresh,selected_acts)
+    else:
+        har.pseudo_label_cluster_meta_meta_loop(dset_train,args.num_meta_meta_epochs,args.num_meta_epochs,args.num_pseudo_label_epochs,args.prob_thresh,selected_acts)
     train_end_time = time.time()
     total_prep_time = asMinutes(train_start_time-prep_start_time)
     total_train_time = asMinutes(train_end_time-train_start_time)
@@ -653,6 +703,8 @@ if __name__ == "__main__":
     parser.add_argument('--frac_gt_labels',type=float,default=0.1)
     parser.add_argument('--fussy_label_numbers',action='store_true')
     parser.add_argument('--gpu',type=str,default='0')
+    parser.add_argument('--load_and_find',action='store_true')
+    parser.add_argument('--load_and_try',action='store_true')
     parser.add_argument('--load_pretrained',action='store_true')
     parser.add_argument('--mlp_lr',type=float,default=1e-3)
     parser.add_argument('--noise',type=float,default=1.)
@@ -667,6 +719,7 @@ if __name__ == "__main__":
     parser.add_argument('--save','-s',action='store_true')
     parser.add_argument('--short_epochs',action='store_true')
     parser.add_argument('--step_size',type=int,default=5)
+    parser.add_argument('--sub_train',action='store_true')
     parser.add_argument('--suppress_prints',action='store_true')
     parser.add_argument('--test','-t',action='store_true')
     parser.add_argument('--no_umap',action='store_true')
