@@ -3,6 +3,7 @@ import torch
 from scipy import stats
 from torch.utils import data
 from dl_utils import label_funcs
+from pdb import set_trace
 
 class ChunkDataset(data.Dataset):
     def __init__(self,x,y,device):
@@ -15,12 +16,37 @@ class ChunkDataset(data.Dataset):
         batch_y = self.y[idx]
         return batch_x, batch_y, idx
 
+class ConcattedDataset(data.Dataset):
+    """Needs datasets to be StepDatasets in order to Concat them."""
+    def __init__(self,xs,ys,device,window_size,step_size):
+        self.device=device
+        self.x, self.y = torch.cat(xs),torch.cat(ys)
+        self.window_size = window_size
+        self.step_size = step_size
+        self.x, self.y = self.x.to(self.device),self.y.to(self.device)
+        component_dset_lengths = [((len(x)-self.window_size)//self.step_size + 1) for x in xs]
+        x_idx_locs = []
+        block_start_idx = 0
+        for x in xs:
+            x_idx_locs += list(range(block_start_idx,block_start_idx+len(x)-window_size+1,step_size))
+            block_start_idx += len(x)
+        self.x_idx_locs = np.array(x_idx_locs)
+        if not len(self.x_idx_locs) == len(self.y): set_trace()
+
+    def __len__(self): return len(self.y)
+    def __getitem__(self,idx):
+        x_idx = self.x_idx_locs[idx]
+        batch_x = self.x[x_idx:x_idx + self.window_size].unsqueeze(0)
+        batch_y = self.y[idx]
+        return batch_x, batch_y, idx
+
 class StepDataset(data.Dataset):
     def __init__(self,x,y,device,window_size,step_size,transforms=[]):
         self.device=device
         self.x, self.y = x,y
         self.window_size = window_size
         self.step_size = step_size
+        self.transforms = transforms
         for transform in transforms:
             self.x = transform(self.x)
         self.x, self.y = self.x.to(self.device),self.y.to(self.device)
@@ -48,8 +74,9 @@ def preproc_xys(x,y,step_size,window_size,action_name_dict):
     x = x[y!=-1]
     y = y[y!=-1]
     num_windows = (len(x) - window_size)//step_size + 1
-    mode_labels = np.concatenate([stats.mode(y[w*step_size:w*step_size + window_size]).mode for w in range(num_windows)])
+    mode_labels = np.array([stats.mode(y[w*step_size:w*step_size + window_size]).mode[0] if (y[w*step_size:w*step_size + window_size]==y[w*step_size]).all() else -1 for w in range(num_windows)])
     selected_ids = set(mode_labels)
+    action_name_dict[-1] = '-1'
     selected_acts = [action_name_dict[act_id] for act_id in selected_ids]
     mode_labels, trans_dict, changed = label_funcs.compress_labels(mode_labels)
     assert len(selected_acts) == len(set(mode_labels))
@@ -174,3 +201,28 @@ def make_dsets_by_user(args,subj_ids):
         dset_subj, _, selected_acts_subj = make_dset_train_val(args,[subj_id])
         dsets_by_id[subj_id] = dset_subj,selected_acts_subj
     return dsets_by_id
+
+def chunked_up(x,step_size,window_size):
+    num_windows = (len(x) - window_size)//step_size + 1
+    return torch.stack([x[i*step_size:i*step_size+window_size] for i in range(num_windows)])
+
+def combine_dsets(dsets):
+    xs = [d.x for d in dsets]
+    ys = [d.y for d in dsets]
+    return ConcattedDataset(xs,ys,dsets[0].device,dsets[0].window_size,dsets[0].step_size)
+
+def combine_dsets_old(*dsets):
+    processed_dset_xs = []
+    for dset in dsets:
+        if isinstance(dset,StepDataset):
+            processed_dset_x = chunked_up(dset.x,dset.step_size,dset.window_size)
+        elif isinstance(dset,ChunkDataset):
+            processed_dset_x = dset.x
+        else:
+            print(f"you're trying to combine dsets on a {type(dset)}, but it has to be a dataset")
+        processed_dset_xs.append(processed_dset_x)
+    x = torch.cat(processed_dset_xs)
+    y = torch.cat([dset.y for dset in dsets])
+    assert len(x) == len(y)
+    combined = ChunkDataset(x,y,dsets[0].device)
+    return combined
