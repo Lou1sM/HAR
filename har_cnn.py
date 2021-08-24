@@ -116,6 +116,7 @@ class HARLearner():
         best_pred_array_ordered = -np.ones(len(dset.y))
         sampler = data.RandomSampler(dset) if custom_sampler is 'none' else custom_sampler
         dl = data.DataLoader(dset,batch_sampler=data.BatchSampler(sampler,self.batch_size,drop_last=False),pin_memory=False)
+        is_mask = multiplicative_mask is not 'none'
         for epoch in range(num_epochs):
             pred_list = []
             idx_list = []
@@ -125,7 +126,7 @@ class HARLearner():
                 latent = self.enc(xb)
                 if noise > 0: latent = noiseify(latent,noise)
                 label_pred = self.mlp(latent) if latent.ndim == 2 else self.mlp(latent[:,:,0,0])
-                batch_mask = 'none' if multiplicative_mask is 'none' else multiplicative_mask[:self.batch_size] if ARGS.test else multiplicative_mask[idx]
+                batch_mask = 'none' if not is_mask  else multiplicative_mask[:self.batch_size] if ARGS.test else multiplicative_mask[idx]
                 loss = lf(label_pred,yb.long(),batch_mask)
                 if math.isnan(loss): set_trace()
                 if rlmbda>0:
@@ -150,9 +151,11 @@ class HARLearner():
             if compute_acc:
                 acc = -1 if ARGS.test else accuracy(pred_array_ordered,dset.y.detach().cpu().numpy())
                 f1 = -1 if ARGS.test else mean_f1(pred_array_ordered,dset.y.detach().cpu().numpy())
-                print(acc)
-                m = numpyify(multiplicative_mask.bool())
-                print(accuracy(pred_array_ordered[m],dset.y.detach().cpu().numpy()[m]))
+                if ARGS.verbose:
+                    print(acc)
+                    if is_mask:
+                        m = numpyify(multiplicative_mask.bool())
+                        print(accuracy(pred_array_ordered[m],dset.y.detach().cpu().numpy()[m]))
                 if ARGS.test or acc > best_acc:
                     best_pred_array_ordered = pred_array_ordered
                     best_conf_array_ordered = conf_array_ordered
@@ -319,7 +322,6 @@ class HARLearner():
         np_gt_labels = dset.y.detach().cpu().numpy().astype(int)
         super_mask = np.ones(len(dset)).astype(np.bool)
         for epoch_num in range(num_meta_epochs):
-            print('Meta Epoch:', epoch_num)
             if ARGS.test:
                 num_tiles = len(dset.y)//self.num_classes
                 new_pred_labels = np.tile(np.arange(self.num_classes),num_tiles).astype(np.long)
@@ -343,7 +345,6 @@ class HARLearner():
                 new_pred_labels = model.predict(umapped_latents)
                 new_pred_probs = model.predict_proba(umapped_latents)
                 mask = new_pred_probs.max(axis=1) >= prob_thresh
-                print('Prob_thresh mask:',sum(mask),sum(mask)/len(new_pred_labels))
                 if ARGS.save: np.save('test_umapped_latents.npy',umapped_latents)
                 if meta_pivot_pred_labels is not 'none':
                     new_pred_labels = translate_labellings(new_pred_labels,meta_pivot_pred_labels,subsample_size=30000)
@@ -358,20 +359,18 @@ class HARLearner():
             super_mask*=mask
             mask_to_use = (mask+super_mask)/2
             mlp_preds = self.pseudo_label_train(pseudo_label_dset,mask=cudify(mask_to_use),num_epochs=num_pseudo_label_epochs,position_in_meta_loop=epoch_num)
-            #print('translating labelling')
-            #print('pseudo label training')
-            #counts = {selected_acts[int(item)]:sum(new_pred_labels==item) for item in set(new_pred_labels)}
-            #mask_counts = {selected_acts[int(item)]:sum(new_pred_labels[mask]==item) for item in set(new_pred_labels[mask])}
-            #print('Counts:',counts)
             y_np = numpyify(dset.y)
-            #print('Masked Counts:',mask_counts)
-            print('Super Masked Counts:',label_counts(y_np[super_mask]))
-            print('Latent accuracy:', accuracy(new_pred_labels,np_gt_labels))
-            print('Masked latent accuracy:', accuracy(new_pred_labels[mask],y_np[mask]),mask.sum())
-            print('Super Masked latent accuracy:', accuracy(new_pred_labels[super_mask],dset.y[super_mask]),super_mask.sum())
-            print('MLP accuracy:', accuracy(mlp_preds,np_gt_labels))
-            print('Masked MLP accuracy:', accuracy(mlp_preds[mask],dset.y[mask]),mask.sum())
-            print('Super Masked MLP accuracy:', accuracy(mlp_preds[super_mask],dset.y[super_mask]),super_mask.sum())
+            if ARGS.verbose:
+                print('Meta Epoch:', epoch_num)
+                print('Super Masked Counts:',label_counts(y_np[super_mask]))
+                print('Latent accuracy:', accuracy(new_pred_labels,np_gt_labels))
+                print('Masked latent accuracy:', accuracy(new_pred_labels[mask],y_np[mask]),mask.sum())
+                print('Super Masked latent accuracy:', accuracy(new_pred_labels[super_mask],dset.y[super_mask]),super_mask.sum())
+                print('MLP accuracy:', accuracy(mlp_preds,np_gt_labels))
+                print('Masked MLP accuracy:', accuracy(mlp_preds[mask],dset.y[mask]),mask.sum())
+                print('Super Masked MLP accuracy:', accuracy(mlp_preds[super_mask],dset.y[super_mask]),super_mask.sum())
+            else:
+                print(f"Latent: {accuracy(new_pred_labels,np_gt_labels)}\tMaskL: {accuracy(new_pred_labels[mask],y_np[mask]),mask.sum()}\tSuperMaskL{accuracy(new_pred_labels[super_mask],dset.y[super_mask]),super_mask.sum()}")
             rand_idxs = np.array([15,1777,1982,9834,11243,25,7777,5982,5834,250,7717,5912,5134])
             preds_for_printing = translate_labellings(new_pred_labels,np_gt_labels,'none')
             #for action_num in np.unique(np_gt_labels):
@@ -585,14 +584,14 @@ def main(args,subj_ids):
     prep_start_time = time.time()
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
     if args.dset == 'PAMAP':
-        x_filters = (50,40,3,3)
-        x_strides = (2,2,1,1)
+        x_filters = (50,40,7,4)
         y_filters = (5,3,2,1)
+        x_strides = (2,2,1,1)
         y_strides = (1,1,1,1)
         max_pools = (2,2,2,2)
-        x_filters_trans = (6,20,20,40)
-        x_strides_trans = (1,2,3,4)
+        x_filters_trans = (45,35,10,6)
         y_filters_trans = (8,8,6,6)
+        x_strides_trans = (1,2,2,2)
         y_strides_trans = (1,1,2,1)
         num_labels = 12
     elif args.dset == 'UCI':
@@ -607,7 +606,7 @@ def main(args,subj_ids):
         y_strides_trans = (2,2,1,1)
         num_labels = 6
     elif args.dset == 'WISDM-v1':
-        x_filters = (50,40,4,4)
+        x_filters = (50,40,5,4)
         y_filters = (1,1,2,2)
         x_strides = (2,2,1,1)
         y_strides = (1,1,1,1)
@@ -618,15 +617,15 @@ def main(args,subj_ids):
         y_strides_trans = (1,1,1,1)
         num_labels = 5
     elif args.dset == 'WISDM-watch':
-        x_filters = (50,40,4,4)
-        y_filters = (1,1,3,2)
+        x_filters = (50,40,8,6)
+        y_filters = (2,2,2,2)
         x_strides = (2,2,1,1)
-        y_strides = (1,1,3,1)
-        max_pools = ((2,1),(3,1),(2,1),1)
-        x_filters_trans = (30,30,20,10)
-        y_filters_trans = (2,3,1,1)
+        y_strides = (2,2,1,1)
+        max_pools = ((2,1),(3,1),1,1)
+        x_filters_trans = (31,30,14,10)
+        y_filters_trans = (2,2,2,2)
         x_strides_trans = (1,3,2,2)
-        y_strides_trans = (1,3,1,2)
+        y_strides_trans = (1,1,2,2)
         num_labels = 17
     enc = EncByLayer(x_filters,y_filters,x_strides,y_strides,max_pools,show_shapes=args.show_shapes)
     dec = DecByLayer(x_filters_trans,y_filters_trans,x_strides_trans,y_strides_trans,show_shapes=args.show_shapes)
@@ -637,6 +636,13 @@ def main(args,subj_ids):
     enc.cuda()
     dec.cuda()
     mlp.cuda()
+    dset_train, dset_val, selected_acts = make_dset_train_val(args,subj_ids)
+    if args.show_shapes:
+        num_ftrs = dset_train.x.shape[-1]
+        print(num_ftrs)
+        lat = enc(torch.ones((2,1,512,num_ftrs),device='cuda'))
+        dec(lat)
+        sys.exit()
 
     har = HARLearner(enc=enc,mlp=mlp,dec=dec,batch_size=args.batch_size,num_classes=num_labels)
     exp_dir = os.path.join(f'experiments/{args.exp_name}')
@@ -650,7 +656,13 @@ def main(args,subj_ids):
             print(f"Excluding user {user_id}, only has {n} different labels, instead of {num_labels}")
             bad_ids.append(user_id)
     dsets_by_id = [v for k,v in dsets_by_id.items() if k not in bad_ids]
+    print("FULL TRAINING")
     har.full_train(dsets_by_id,args)
+    print("\nCLUSTERING AS SINGLE DSET")
+    har.pseudo_label_cluster_meta_meta_loop(dset_train,args.num_meta_meta_epochs,args.num_meta_epochs,args.num_pseudo_label_epochs,args.prob_thresh,selected_acts)
+    print("\nTRAINING ON WITH FRAC GTS AS SINGLE DSET")
+    acc,f1,preds,confs = har.train_on(dset_train,args.num_pseudo_label_epochs)
+    print(acc)
 
     #dset_train, dset_val, selected_acts = make_dset_train_val(args,subj_ids)
     #if args.load_and_try:
@@ -718,6 +730,7 @@ if __name__ == "__main__":
     parser.add_argument('--load_and_try',action='store_true')
     parser.add_argument('--load_pretrained',action='store_true')
     parser.add_argument('--mlp_lr',type=float,default=1e-3)
+    parser.add_argument('--no_umap',action='store_true')
     parser.add_argument('--noise',type=float,default=1.)
     parser.add_argument('--num_epochs',type=int,default=30)
     parser.add_argument('--num_meta_epochs',type=int,default=4)
@@ -733,8 +746,8 @@ if __name__ == "__main__":
     parser.add_argument('--sub_train',action='store_true')
     parser.add_argument('--suppress_prints',action='store_true')
     parser.add_argument('--test','-t',action='store_true')
-    parser.add_argument('--no_umap',action='store_true')
     parser.add_argument('--show_shapes',action='store_true',help='print the shapes of hidden layers in enc and dec')
+    parser.add_argument('--verbose',action='store_true')
     parser.add_argument('--window_size',type=int,default=512)
     ARGS = parser.parse_args()
 

@@ -211,7 +211,7 @@ def combine_dsets(dsets):
     ys = [d.y for d in dsets]
     return ConcattedDataset(xs,ys,dsets[0].device,dsets[0].window_size,dsets[0].step_size)
 
-def combine_dsets_old(*dsets):
+def combine_dsets_old(dsets):
     processed_dset_xs = []
     for dset in dsets:
         if isinstance(dset,StepDataset):
