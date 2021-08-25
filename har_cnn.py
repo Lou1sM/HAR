@@ -24,13 +24,22 @@ class EncByLayer(nn.Module):
         num_layers = len(x_filters)
         assert all(len(x)==num_layers for x in (y_filters,x_strides,y_strides,max_pools))
         ncvs = [1]+[4*2**i for i in range(num_layers)]
-        conv_layers = [nn.Sequential(
+        conv_layers = []
+        for i in range(num_layers):
+            if i<num_layers-1:
+                conv_layer = nn.Sequential(
                 nn.Conv2d(ncvs[i],ncvs[i+1],(x_filters[i],y_filters[i]),(x_strides[i],y_strides[i])),
                 nn.BatchNorm2d(ncvs[i+1]),
                 nn.LeakyReLU(0.3),
                 nn.MaxPool2d(max_pools[i])
                 )
-            for i in range(num_layers)]
+            else: #No batch norm on the last layer
+                conv_layer = nn.Sequential(
+                nn.Conv2d(ncvs[i],ncvs[i+1],(x_filters[i],y_filters[i]),(x_strides[i],y_strides[i])),
+                nn.LeakyReLU(0.3),
+                nn.MaxPool2d(max_pools[i])
+                )
+            conv_layers.append(conv_layer)
         self.conv_layers = nn.ModuleList(conv_layers)
 
     def forward(self,x):
@@ -123,6 +132,7 @@ class HARLearner():
             conf_list = []
             best_f1 = 0
             for batch_idx, (xb,yb,idx) in enumerate(dl):
+                if len(xb) == 1: continue # If last batch is only one element then batchnorm will error
                 latent = self.enc(xb)
                 if noise > 0: latent = noiseify(latent,noise)
                 label_pred = self.mlp(latent) if latent.ndim == 2 else self.mlp(latent[:,:,0,0])
@@ -656,13 +666,13 @@ def main(args,subj_ids):
             print(f"Excluding user {user_id}, only has {n} different labels, instead of {num_labels}")
             bad_ids.append(user_id)
     dsets_by_id = [v for k,v in dsets_by_id.items() if k not in bad_ids]
+    print("\nTRAINING ON WITH FRAC GTS AS SINGLE DSET")
+    acc,f1,preds,confs = har.train_on(dset_train,args.num_pseudo_label_epochs)
+    print(acc)
     print("FULL TRAINING")
     har.full_train(dsets_by_id,args)
     print("\nCLUSTERING AS SINGLE DSET")
     har.pseudo_label_cluster_meta_meta_loop(dset_train,args.num_meta_meta_epochs,args.num_meta_epochs,args.num_pseudo_label_epochs,args.prob_thresh,selected_acts)
-    print("\nTRAINING ON WITH FRAC GTS AS SINGLE DSET")
-    acc,f1,preds,confs = har.train_on(dset_train,args.num_pseudo_label_epochs)
-    print(acc)
 
     #dset_train, dset_val, selected_acts = make_dset_train_val(args,subj_ids)
     #if args.load_and_try:
@@ -758,7 +768,7 @@ if __name__ == "__main__":
         ARGS.num_meta_meta_epochs = 1
         ARGS.num_cluster_epochs = 1
         ARGS.num_pseudo_label_epochs = 1
-    elif not ARGS.no_umap: import umap
+    elif not ARGS.no_umap and not ARGS.show_shapes: import umap
     if ARGS.short_epochs:
         ARGS.num_meta_epochs = 1
         ARGS.num_cluster_epochs = 1
