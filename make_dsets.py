@@ -74,7 +74,8 @@ def preproc_xys(x,y,step_size,window_size,action_name_dict):
     x = x[y!=-1]
     y = y[y!=-1]
     num_windows = (len(x) - window_size)//step_size + 1
-    mode_labels = np.array([stats.mode(y[w*step_size:w*step_size + window_size]).mode[0] if (y[w*step_size:w*step_size + window_size]==y[w*step_size]).all() else -1 for w in range(num_windows)])
+    #mode_labels = np.array([stats.mode(y[w*step_size:w*step_size + window_size]).mode[0] if (y[w*step_size:w*step_size + window_size]==y[w*step_size]).all() else -1 for w in range(num_windows)])
+    mode_labels = np.array([stats.mode(y[w*step_size:w*step_size + window_size]).mode[0] for w in range(num_windows)])
     selected_ids = set(mode_labels)
     action_name_dict[-1] = '-1'
     selected_acts = [action_name_dict[act_id] for act_id in selected_ids]

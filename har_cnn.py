@@ -78,7 +78,6 @@ class Var_BS_MLP(nn.Module):
         self.bn1 = nn.BatchNorm1d(hidden_size)
         self.act1 = nn.LeakyReLU(0.3)
         self.fc2 = nn.Linear(hidden_size,output_size)
-        #self.act2 = nn.Softmax()
 
     def forward(self,x):
         x = self.fc1(x)
@@ -86,7 +85,6 @@ class Var_BS_MLP(nn.Module):
             x = self.bn1(x)
         x = self.act1(x)
         x = self.fc2(x)
-        #x = self.act2(x)
         return x
 
 class HARLearner():
@@ -176,15 +174,6 @@ class HARLearner():
     def train_with_fract_gts_on(self,dset,num_epochs,frac_gt_labels,reinit=False,rlmbda=0):
         gt_mask = stratified_sample_mask(len(dset),frac_gt_labels)
         gt_mask = cudify(gt_mask)
-        #if frac_gt_labels == 0:
-        #    gt_idx = np.array([], dtype=np.int)
-        #elif frac_gt_labels <= 0.5:
-        #    gt_idx = np.arange(len(dset), step=int(1/frac_gt_labels))
-        #else:
-        #    non_gt_idx = np.arange(len(dset), step=int(1/(1-frac_gt_labels)))
-        #    gt_idx = np.delete(np.arange(len(dset)),non_gt_idx)
-        #gt_mask = torch.zeros_like(dset.y)
-        #gt_mask[gt_idx] = 1
         approx = gt_mask.sum()/len(dset)
         if abs(approx - frac_gt_labels) > .01:
             print(f"frac_gts approximation is {approx}, instead of {frac_gt_labels}")
@@ -307,7 +296,6 @@ class HARLearner():
                     loss = (self.pseudo_label_lf(pseudo_label_pred,yb)*batch_mask).mean()
                 else:
                     loss = torch.tensor(0,device=xb.device)
-                #if not batch_mask.all() and rlmbda > 0:
                 latents_to_rec_train = latent
                 rec_pred = self.dec(latents_to_rec_train)
                 rec_loss = (self.rec_lf(rec_pred,xb).mean((1,2,3))*(1-batch_mask)).mean()
@@ -383,15 +371,6 @@ class HARLearner():
                 print(f"Latent: {accuracy(new_pred_labels,np_gt_labels)}\tMaskL: {accuracy(new_pred_labels[mask],y_np[mask]),mask.sum()}\tSuperMaskL{accuracy(new_pred_labels[super_mask],dset.y[super_mask]),super_mask.sum()}")
             rand_idxs = np.array([15,1777,1982,9834,11243,25,7777,5982,5834,250,7717,5912,5134])
             preds_for_printing = translate_labellings(new_pred_labels,np_gt_labels,'none')
-            #for action_num in np.unique(np_gt_labels):
-            #    action_preds = preds_for_printing[np_gt_labels==action_num]
-            #    action_name = selected_acts[action_num]
-            #    num_correct = (action_preds==action_num).sum()
-            #    total_num = len(action_preds)
-            #    print(f"{action_name}: {round(num_correct/total_num,3)} ({num_correct}/{total_num})")
-            #print('GT:',dset.y[rand_idxs].int().tolist())
-            #print('Old:',old_pred_labels[rand_idxs])
-            #print('New:',new_pred_labels[rand_idxs])
             old_pred_labels = deepcopy(new_pred_labels)
         super_super_mask = np.logical_and(super_mask,new_pred_labels==mlp_preds)
         return new_pred_labels, mask, super_mask, super_super_mask
@@ -455,7 +434,6 @@ class HARLearner():
             if len(others_dsets) == 1: print("not enough dsets to full_train, specify more subj_ids"); sys.exit()
             combined_other_dsets = combine_dsets(others_dsets)
             mask_for_others = stratified_sample_mask(len(combined_other_dsets),args.frac_gt_labels)
-            #self.train_on(full_combined_dsets,8,mask)
             self.train_on(combined_other_dsets,args.num_pseudo_label_epochs,cudify(mask_for_others))
             acc_,f1_,others_language_pseudo_label_preds = self.val_on(pseudo_label_dset)
             pseudo_label_dset.y = cudify(translate_labellings(pseudo_labels,others_language_pseudo_label_preds,'none'))
@@ -491,7 +469,7 @@ class HARLearner():
         simplified_labels[likely_hard_class] = catch_all_label
         train_mask = np.logical_or(got_by_super_super_masks,likely_hard_class).astype(float)
         not_to_be_trained_on = simplified_labels==-1
-        simplified_labels[not_to_be_trained_on] = catch_all_label # Can't have -1's when training, these points will be masked out anyway
+        #simplified_labels[not_to_be_trained_on] = catch_all_label # Can't have -1's when training, these points will be masked out anyway
         pseudo_label_dset = deepcopy(dset)
         pseudo_label_dset.y = cudify(simplified_labels)
         gt_trans_dict = {}
@@ -666,52 +644,16 @@ def main(args,subj_ids):
             print(f"Excluding user {user_id}, only has {n} different labels, instead of {num_labels}")
             bad_ids.append(user_id)
     dsets_by_id = [v for k,v in dsets_by_id.items() if k not in bad_ids]
-    print("\nTRAINING ON WITH FRAC GTS AS SINGLE DSET")
-    acc,f1,preds,confs = har.train_on(dset_train,args.num_pseudo_label_epochs)
-    print(acc)
-    print("FULL TRAINING")
-    har.full_train(dsets_by_id,args)
-    print("\nCLUSTERING AS SINGLE DSET")
-    har.pseudo_label_cluster_meta_meta_loop(dset_train,args.num_meta_meta_epochs,args.num_meta_epochs,args.num_pseudo_label_epochs,args.prob_thresh,selected_acts)
-
-    #dset_train, dset_val, selected_acts = make_dset_train_val(args,subj_ids)
-    #if args.load_and_try:
-    #    mask = np.load('super_masks.npy').any(axis=0)
-    #    pseudo_labels = np.load('try_pseudo_labels.npy')
-    #    pseudo_label_dset = deepcopy(dset_train)
-    #    pseudo_labels[~mask] = 3 # Can't have -1's in loss function, these dps will be masked out anyway
-    #    pseudo_label_dset.y = cudify(pseudo_labels)
-    #    pseudo_label_counts = label_counts(pseudo_labels)
-    #    class_counts_per_dp = np.array(list(pseudo_label_counts[t] for t in pseudo_labels))
-    #    class_weights = 1./class_counts_per_dp
-    #    print(class_weights)
-    #    sampler = data.WeightedRandomSampler(class_weights,len(class_weights))
-    #    train_acc, train_f1, train_preds, train_confs = har.train_on(pseudo_label_dset,multiplicative_mask=cudify(mask).int(),num_epochs=10,custom_sampler=sampler)
-    #    print(train_acc,train_f1)
-    #    val_acc, val_f1, val_preds = har.val_on(dset_val)
-    #    print(val_acc,val_f1)
-    #    facc,ff1,fpreds,fconfs = har.train_with_fract_gts_on(dset_train,10,0.1)
-    #    print(f"acc with frac gts:{facc}")
-    #    set_trace()
-    #elif args.load_and_find:
-    #    har.load_and_find_hard_classes(dset_train,args)
-    #elif args.sub_train:
-    #    super_mask_histories = np.load('super_masks.npy')
-    #    preds_histories = np.load('preds.npy')
-    #    surely_correct = np.stack(super_mask_histories).all(axis=0)
-    #    masked_mode_labels = masked_mode(preds_histories,super_mask_histories)
-    #    num_already_taken_care_of = get_num_labels(preds_histories[0][surely_correct])
-    #    vv_likely_hard_class = np.load('vv_likely_hard_class.npy')
-    #    x_np = numpyify(dset_train.x)
-    #    x_chunks=np.stack([x_np[i*args.step_size:(i*args.step_size) + args.window_size] for i,b in enumerate(vv_likely_hard_class) if b])
-    #    tdset = ChunkDataset(cudify(x_chunks),cudify(numpyify(dset_train.y)[vv_likely_hard_class]),'cuda')
-    #    mlp = Var_BS_MLP(32,25,num_labels)
-    #    num_hard_classes = num_labels - num_already_taken_care_of
-    #    mlp = Var_BS_MLP(32,25,num_hard_classes).cuda()
-    #    sub_har_learner = HARLearner(enc=enc,dec=dec,mlp=mlp,batch_size=args.batch_size,num_classes=num_hard_classes)
-    #    sub_har_learner.pseudo_label_cluster_meta_meta_loop(tdset,args.num_meta_meta_epochs,args.num_meta_epochs,args.num_pseudo_label_epochs,args.prob_thresh,selected_acts)
-    #else:
-    #    har.pseudo_label_cluster_meta_meta_loop(dset_train,args.num_meta_meta_epochs,args.num_meta_epochs,args.num_pseudo_label_epochs,args.prob_thresh,selected_acts)
+    if args.train_type == 'train_with_fract_gts_as_single':
+        print("\nTRAINING ON WITH FRAC GTS AS SINGLE DSET")
+        acc,f1,preds,confs = har.train_with_fract_gts_on(dset_train,args.num_pseudo_label_epochs,args.frac_gt_labels)
+        print(acc)
+    if args.train_type == 'full':
+        print("FULL TRAINING")
+        har.full_train(dsets_by_id,args)
+    if args.train_type == 'cluster_as_single':
+        print("\nCLUSTERING AS SINGLE DSET")
+        har.pseudo_label_cluster_meta_meta_loop(dset_train,args.num_meta_meta_epochs,args.num_meta_epochs,args.num_pseudo_label_epochs,args.prob_thresh,selected_acts)
     train_end_time = time.time()
     total_prep_time = asMinutes(train_start_time-prep_start_time)
     total_train_time = asMinutes(train_end_time-train_start_time)
@@ -721,6 +663,7 @@ def main(args,subj_ids):
 if __name__ == "__main__":
 
     dset_options = ['PAMAP','UCI','WISDM-v1','WISDM-watch']
+    training_type_options = ['full','cluster_as_single','train_frac_gts_as_single']
     parser = argparse.ArgumentParser()
     group = parser.add_mutually_exclusive_group(required=False)
     group.add_argument('--num_subjs',type=int)
@@ -728,7 +671,6 @@ if __name__ == "__main__":
     parser.add_argument('--all_subjs',action='store_true')
     parser.add_argument('--alpha',type=float,default=.5)
     parser.add_argument('--batch_size',type=int,default=128)
-    parser.add_argument('--cross_train',action='store_true')
     parser.add_argument('--dec_lr',type=float,default=1e-3)
     parser.add_argument('--dset',type=str,default='PAMAP',choices=dset_options)
     parser.add_argument('--enc_lr',type=float,default=1e-3)
@@ -756,6 +698,7 @@ if __name__ == "__main__":
     parser.add_argument('--sub_train',action='store_true')
     parser.add_argument('--suppress_prints',action='store_true')
     parser.add_argument('--test','-t',action='store_true')
+    parser.add_argument('--train_type',type=str,choices=training_type_options)
     parser.add_argument('--show_shapes',action='store_true',help='print the shapes of hidden layers in enc and dec')
     parser.add_argument('--verbose',action='store_true')
     parser.add_argument('--window_size',type=int,default=512)
