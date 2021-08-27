@@ -367,7 +367,7 @@ class HARLearner():
                 print('MLP accuracy:', accuracy(mlp_preds,np_gt_labels))
                 print('Masked MLP accuracy:', accuracy(mlp_preds[mask],dset.y[mask]),mask.sum())
                 print('Super Masked MLP accuracy:', accuracy(mlp_preds[super_mask],dset.y[super_mask]),super_mask.sum())
-            else:
+            elif epoch_num == num_meta_epochs-1:
                 print(f"Latent: {accuracy(new_pred_labels,np_gt_labels)}\tMaskL: {accuracy(new_pred_labels[mask],y_np[mask]),mask.sum()}\tSuperMaskL{accuracy(new_pred_labels[super_mask],dset.y[super_mask]),super_mask.sum()}")
             rand_idxs = np.array([15,1777,1982,9834,11243,25,7777,5982,5834,250,7717,5912,5134])
             preds_for_printing = translate_labellings(new_pred_labels,np_gt_labels,'none')
@@ -427,21 +427,27 @@ class HARLearner():
         preds_from_users_list = []
         accs = []
         for user_id, (user_dset, sa) in enumerate(user_dsets):
+            print(f"training on {user_id}")
             pseudo_labels, conf_mask, very_conf_mask, very_very_conf_mask  = self.pseudo_label_cluster_meta_loop(user_dset,'none',args.num_cluster_epochs,num_pseudo_label_epochs=5,prob_thresh=args.prob_thresh,selected_acts=sa)
             pseudo_label_dset = deepcopy(user_dset)
-            pseudo_label_dset.y = cudify(pseudo_labels)
             others_dsets = [udset for uid, (udset,sa) in enumerate(user_dsets) if uid!=user_id]
-            if len(others_dsets) == 1: print("not enough dsets to full_train, specify more subj_ids"); sys.exit()
+            if len(others_dsets) <= 1: print("not enough dsets to full_train, specify more subj_ids"); sys.exit()
             combined_other_dsets = combine_dsets(others_dsets)
             mask_for_others = stratified_sample_mask(len(combined_other_dsets),args.frac_gt_labels)
-            self.train_on(combined_other_dsets,args.num_pseudo_label_epochs,cudify(mask_for_others))
+            acc,f1,preds,confs=self.train_on(combined_other_dsets,args.num_pseudo_label_epochs,cudify(mask_for_others))
             acc_,f1_,others_language_pseudo_label_preds = self.val_on(pseudo_label_dset)
-            pseudo_label_dset.y = cudify(translate_labellings(pseudo_labels,others_language_pseudo_label_preds,'none'))
+            translated_pseudo_labels = translate_labellings(pseudo_labels,others_language_pseudo_label_preds,'none')
+            pseudo_label_dset.y = cudify(translated_pseudo_labels)
+            gt_translation = translate_labellings(pseudo_labels,others_language_pseudo_label_preds)
+            print((translated_pseudo_labels==gt_translation).mean())
+            acc_others,f1_others,preds_others = self.val_on(user_dset)
+            print(f"acc from just others: {acc_others}")
             full_train_dsets = others_dsets + [pseudo_label_dset]
             full_combined_dsets = combine_dsets(full_train_dsets)
             mask = cudify(np.concatenate([mask_for_others,very_conf_mask]))
             self.train_on(full_combined_dsets,args.num_pseudo_label_epochs,mask)
             acc,f1,preds = self.val_on(user_dset)
+            print(f"acc when add pseudo labels: {acc}")
             accs.append(acc)
         total_num_dpoints = sum(len(ud) for ud,sa in user_dsets)
         weighted_sum_acc = sum([a*len(ud) for a, (ud, sa) in zip(accs, user_dsets)])/total_num_dpoints
@@ -644,15 +650,15 @@ def main(args,subj_ids):
             print(f"Excluding user {user_id}, only has {n} different labels, instead of {num_labels}")
             bad_ids.append(user_id)
     dsets_by_id = [v for k,v in dsets_by_id.items() if k not in bad_ids]
-    if args.train_type == 'train_with_fract_gts_as_single':
-        print("\nTRAINING ON WITH FRAC GTS AS SINGLE DSET")
+    if args.train_type == 'train_frac_gts_as_single':
+        print("TRAINING ON WITH FRAC GTS AS SINGLE DSET")
         acc,f1,preds,confs = har.train_with_fract_gts_on(dset_train,args.num_pseudo_label_epochs,args.frac_gt_labels)
         print(acc)
     if args.train_type == 'full':
         print("FULL TRAINING")
         har.full_train(dsets_by_id,args)
     if args.train_type == 'cluster_as_single':
-        print("\nCLUSTERING AS SINGLE DSET")
+        print("CLUSTERING AS SINGLE DSET")
         har.pseudo_label_cluster_meta_meta_loop(dset_train,args.num_meta_meta_epochs,args.num_meta_epochs,args.num_pseudo_label_epochs,args.prob_thresh,selected_acts)
     train_end_time = time.time()
     total_prep_time = asMinutes(train_start_time-prep_start_time)
