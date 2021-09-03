@@ -426,9 +426,12 @@ class HARLearner():
     def full_train(self,user_dsets,args):
         preds_from_users_list = []
         accs = []
+        accs_from_others = []
+        self_accs = []
         for user_id, (user_dset, sa) in enumerate(user_dsets):
             print(f"training on {user_id}")
             pseudo_labels, conf_mask, very_conf_mask, very_very_conf_mask  = self.pseudo_label_cluster_meta_loop(user_dset,'none',args.num_cluster_epochs,num_pseudo_label_epochs=5,prob_thresh=args.prob_thresh,selected_acts=sa)
+            self_accs.append(accuracy(pseudo_labels,numpyify(user_dset.y)))
             pseudo_label_dset = deepcopy(user_dset)
             others_dsets = [udset for uid, (udset,sa) in enumerate(user_dsets) if uid!=user_id]
             if len(others_dsets) <= 1: print("not enough dsets to full_train, specify more subj_ids"); sys.exit()
@@ -439,9 +442,12 @@ class HARLearner():
             translated_pseudo_labels = translate_labellings(pseudo_labels,others_language_pseudo_label_preds,'none')
             pseudo_label_dset.y = cudify(translated_pseudo_labels)
             gt_translation = translate_labellings(pseudo_labels,others_language_pseudo_label_preds)
-            print((translated_pseudo_labels==gt_translation).mean())
+            translation_accuracy = (translated_pseudo_labels==gt_translation).mean()
+            if translation_accuracy<1: print("translation acc is only {translation_accuracy}")
             acc_others,f1_others,preds_others = self.val_on(user_dset)
+            print(label_counts(numpyify(user_dset.y)))
             print(f"acc from just others: {acc_others}")
+            accs_from_others.append(acc_others)
             full_train_dsets = others_dsets + [pseudo_label_dset]
             full_combined_dsets = combine_dsets(full_train_dsets)
             mask = cudify(np.concatenate([mask_for_others,very_conf_mask]))
@@ -450,9 +456,8 @@ class HARLearner():
             print(f"acc when add pseudo labels: {acc}")
             accs.append(acc)
         total_num_dpoints = sum(len(ud) for ud,sa in user_dsets)
-        weighted_sum_acc = sum([a*len(ud) for a, (ud, sa) in zip(accs, user_dsets)])/total_num_dpoints
-        print(accs)
-        print(f"Total acc: {weighted_sum_acc}")
+        for n,acc_list in zip((accs_from_others,self_accs,accs),('others','self','both')):
+            print(n,sum([a*len(ud) for a, (ud, sa) in zip(acc_list, user_dsets)])/total_num_dpoints)
 
     def load_and_find_hard_classes(self,dset,args):
         super_super_mask_histories = np.stack(np.load('super_super_masks.npy'))
@@ -513,6 +518,42 @@ class HARLearner():
             vv_likely_hard_class = np.logical_and(v_likely_hard_class,train_confs>thresh)
         np.save('vv_likely_hard_class.npy',vv_likely_hard_class)
         print(acc,f1)
+
+    def find_similar_users(self,user_dsets,args):
+        preds_from_users_list = []
+        accs = []
+        all_similar_users = []
+        for user_id, (user_dset, sa) in enumerate(user_dsets):
+            user_accs = []
+            print(f"training on {user_id}")
+            self.train_with_fract_gts_on(user_dset,args.num_pseudo_label_epochs,args.frac_gt_labels)
+            for other_id, (other_dset, sa) in enumerate(user_dsets):
+                acc,f1,preds = self.val_on(other_dset)
+                user_accs.append(acc)
+            accs.append(user_accs)
+            most_similar_users = numpyify(torch.topk(torch.tensor(user_accs),5)[1]).tolist()
+            print(most_similar_users)
+            if user_id in most_similar_users: most_similar_users.remove(user_id)
+            all_similar_users.append(most_similar_users)
+        full_accs = []
+        for user_id, (user_dset, sa) in enumerate(user_dsets):
+            others_dsets = [udset for uid, (udset,sa) in enumerate(user_dsets) if uid!=user_id]
+            combined_other_dsets = combine_dsets(others_dsets)
+            acc,f1,preds,confs=self.train_with_fract_gts_on(combined_other_dsets,args.num_pseudo_label_epochs,args.frac_gt_labels)
+            acc,f1,preds = self.val_on(user_dset)
+            full_accs.append(acc)
+        accs.append(full_accs)
+        similars_accs = []
+        for user_id, (user_dset, sa) in enumerate(user_dsets):
+            similars = all_similar_users[user_id]
+            others_dsets = [udset for uid, (udset,sa) in enumerate(user_dsets) if uid in similars]
+            combined_other_dsets = combine_dsets(others_dsets)
+            acc,f1,preds,confs=self.train_with_fract_gts_on(combined_other_dsets,args.num_pseudo_label_epochs*2,args.frac_gt_labels)
+            acc,f1,preds = self.val_on(user_dset)
+            similars_accs.append(acc)
+        accs.append(similars_accs)
+        acc_mat = np.array(accs)
+        print(acc_mat)
 
 def stratified_sample_mask(population_length, sample_frac):
     if sample_frac == 0:
@@ -654,12 +695,20 @@ def main(args,subj_ids):
         print("TRAINING ON WITH FRAC GTS AS SINGLE DSET")
         acc,f1,preds,confs = har.train_with_fract_gts_on(dset_train,args.num_pseudo_label_epochs,args.frac_gt_labels)
         print(acc)
-    if args.train_type == 'full':
+    elif args.train_type == 'full':
         print("FULL TRAINING")
         har.full_train(dsets_by_id,args)
-    if args.train_type == 'cluster_as_single':
+    elif args.train_type == 'find_similar_users':
+        print("FULL TRAINING")
+        har.find_similar_users(dsets_by_id,args)
+    elif args.train_type == 'cluster_as_single':
         print("CLUSTERING AS SINGLE DSET")
         har.pseudo_label_cluster_meta_meta_loop(dset_train,args.num_meta_meta_epochs,args.num_meta_epochs,args.num_pseudo_label_epochs,args.prob_thresh,selected_acts)
+    elif args.train_type == 'cluster_individually':
+        print("CLUSTERING AS EACH DSET SEPARATELY")
+        for user_id, (dset,sa) in enumerate(dsets_by_id):
+            print("clustering", user_id)
+            har.pseudo_label_cluster_meta_meta_loop(dset,args.num_meta_meta_epochs,args.num_meta_epochs,args.num_pseudo_label_epochs,args.prob_thresh,selected_acts)
     train_end_time = time.time()
     total_prep_time = asMinutes(train_start_time-prep_start_time)
     total_train_time = asMinutes(train_end_time-train_start_time)
@@ -669,7 +718,7 @@ def main(args,subj_ids):
 if __name__ == "__main__":
 
     dset_options = ['PAMAP','UCI','WISDM-v1','WISDM-watch']
-    training_type_options = ['full','cluster_as_single','train_frac_gts_as_single']
+    training_type_options = ['full','cluster_as_single','cluster_individually','train_frac_gts_as_single','find_similar_users']
     parser = argparse.ArgumentParser()
     group = parser.add_mutually_exclusive_group(required=False)
     group.add_argument('--num_subjs',type=int)
