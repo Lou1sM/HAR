@@ -277,44 +277,6 @@ class HARLearner():
         print(results_matrix)
         return results_matrix
 
-    def pseudo_label_train(self,pseudo_label_dset,mask,num_epochs,position_in_meta_loop=0):
-        self.enc.train()
-        pseudo_label_dl = data.DataLoader(pseudo_label_dset,batch_sampler=data.BatchSampler(data.RandomSampler(pseudo_label_dset),self.batch_size,drop_last=False),pin_memory=False)
-        rlmbda = 1 - (position_in_meta_loop/3)
-        noise = ARGS.noise*(1 - (position_in_meta_loop/3))
-        for epoch_num in range(num_epochs):
-            pred_list = []
-            idx_list = []
-            for batch_idx, (xb,yb,idx) in enumerate(pseudo_label_dl):
-                batch_mask = mask[idx]
-                latent = self.enc(xb)
-                latent = noiseify(latent,noise)
-                if batch_mask.any():
-                    try:
-                        pseudo_label_pred = self.mlp(latent[:,:,0,0])
-                    except ValueError: set_trace()
-                    loss = (self.pseudo_label_lf(pseudo_label_pred,yb)*batch_mask).mean()
-                else:
-                    loss = torch.tensor(0,device=xb.device)
-                latents_to_rec_train = latent
-                rec_pred = self.dec(latents_to_rec_train)
-                rec_loss = (self.rec_lf(rec_pred,xb).mean((1,2,3))*(1-batch_mask)).mean()
-                loss += rlmbda*rec_loss
-                if math.isnan(loss): set_trace()
-                loss.backward()
-                self.enc_opt.step(); self.enc_opt.zero_grad()
-                self.dec_opt.step(); self.dec_opt.zero_grad()
-                self.mlp_opt.step(); self.mlp_opt.zero_grad()
-                pred_list.append(pseudo_label_pred.argmax(axis=1).detach().cpu().numpy())
-                idx_list.append(idx.detach().cpu().numpy())
-            if ARGS.test:
-                pred_array_ordered = dummy_labels(self.num_classes,len(pseudo_label_dset))
-                break
-            pred_array = np.concatenate(pred_list)
-            idx_array = np.concatenate(idx_list)
-            pred_array_ordered = np.array([item[0] for item in sorted(zip(pred_array,idx_array),key=lambda x:x[1])])
-        return pred_array_ordered
-
     def pseudo_label_cluster_meta_loop(self,dset,meta_pivot_pred_labels,num_meta_epochs,num_pseudo_label_epochs,prob_thresh,selected_acts):
         old_pred_labels = -np.ones(dset.y.shape)
         np_gt_labels = dset.y.detach().cpu().numpy().astype(int)
@@ -356,7 +318,7 @@ class HARLearner():
                 assert (new_pred_labels[mask]==old_pred_labels[mask]).all()
             super_mask*=mask
             mask_to_use = (mask+super_mask)/2
-            mlp_preds = self.pseudo_label_train(pseudo_label_dset,mask=cudify(mask_to_use),num_epochs=num_pseudo_label_epochs,position_in_meta_loop=epoch_num)
+            mlp_preds = self.train_on(pseudo_label_dset,multiplicative_mask=cudify(mask_to_use),num_epochs=num_pseudo_label_epochs)
             y_np = numpyify(dset.y)
             if ARGS.verbose:
                 print('Meta Epoch:', epoch_num)
@@ -407,7 +369,8 @@ class HARLearner():
             best_preds_so_far[got_by_super_masks] = super_mask_mode_preds[got_by_super_masks]
             best_preds_so_far[got_by_super_super_masks] = super_super_mask_mode_preds[got_by_super_super_masks]
             assert not (best_preds_so_far==-1).any()
-            print('Acc of best so far', accuracy(best_preds_so_far,y_np))
+            best_acc = accuracy(best_preds_so_far,y_np)
+            print('Acc of best so far',best_acc)
 
         surely_correct = np.stack(super_mask_histories).all(axis=0)
         macc = lambda mask: accuracy(best_preds_so_far[mask],y_np[mask])
