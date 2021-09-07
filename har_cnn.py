@@ -642,6 +642,7 @@ def main(args,subj_ids):
         dec(lat)
         sys.exit()
 
+    if args.num_classes != -1: num_classes = args.num_classes
     har = HARLearner(enc=enc,mlp=mlp,dec=dec,batch_size=args.batch_size,num_classes=num_labels)
     exp_dir = os.path.join(f'experiments/{args.exp_name}')
 
@@ -706,6 +707,7 @@ if __name__ == "__main__":
     parser.add_argument('--num_meta_epochs',type=int,default=4)
     parser.add_argument('--num_meta_meta_epochs',type=int,default=4)
     parser.add_argument('--num_pseudo_label_epochs',type=int,default=3)
+    parser.add_argument('--num_classes',type=int,default=-1)
     parser.add_argument('--num_cluster_epochs',type=int,default=5)
     parser.add_argument('--parallel',action='store_true')
     parser.add_argument('--prob_thresh',type=float,default=.95)
