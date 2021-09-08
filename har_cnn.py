@@ -303,6 +303,7 @@ class HARLearner():
                 model.transmat_ = (np.eye(self.num_classes) * (1-prob_new_action)) + (np.ones((self.num_classes,self.num_classes))*prob_new_action/self.num_classes)
                 model.fit(umapped_latents)
                 new_pred_labels = model.predict(umapped_latents)
+                print(label_counts(new_pred_labels))
                 new_pred_probs = model.predict_proba(umapped_latents)
                 mask = new_pred_probs.max(axis=1) >= prob_thresh
                 if ARGS.save: np.save('test_umapped_latents.npy',umapped_latents)
@@ -318,7 +319,8 @@ class HARLearner():
                 assert (new_pred_labels[mask]==old_pred_labels[mask]).all()
             super_mask*=mask
             mask_to_use = (mask+super_mask)/2
-            mlp_preds = self.train_on(pseudo_label_dset,multiplicative_mask=cudify(mask_to_use),num_epochs=num_pseudo_label_epochs)
+            mlp_acc,mlp_f1,mlp_preds,mlp_confs = self.train_on(pseudo_label_dset,multiplicative_mask=cudify(mask_to_use),num_epochs=num_pseudo_label_epochs)
+            print(label_counts(mlp_preds))
             y_np = numpyify(dset.y)
             if ARGS.verbose:
                 print('Meta Epoch:', epoch_num)
@@ -718,7 +720,7 @@ if __name__ == "__main__":
     parser.add_argument('--sub_train',action='store_true')
     parser.add_argument('--suppress_prints',action='store_true')
     parser.add_argument('--test','-t',action='store_true')
-    parser.add_argument('--train_type',type=str,choices=training_type_options)
+    parser.add_argument('--train_type',type=str,choices=training_type_options,default='cluster_individually')
     parser.add_argument('--show_shapes',action='store_true',help='print the shapes of hidden layers in enc and dec')
     parser.add_argument('--verbose',action='store_true')
     parser.add_argument('--window_size',type=int,default=512)

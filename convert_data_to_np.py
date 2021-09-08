@@ -56,6 +56,9 @@ if __name__ == "__main__":
     elif sys.argv[1] == 'UCI-raw':
         data_dir = 'UCI2/RawData'
         np_dir = 'UCI2/np_data'
+        if not os.path.isdir(np_dir):
+            os.makedirs(np_dir)
+
         raw_label_array = array_from_txt(os.path.join(data_dir,'labels.txt')).astype(int)
         def two_digitify(x): return '0'+str(x) if len(str(x))==1 else str(x)
         fnames = os.listdir(data_dir)
@@ -101,6 +104,9 @@ if __name__ == "__main__":
         p_dir = 'wisdm-dataset/raw/phone'
         w_dir = 'wisdm-dataset/raw/watch'
         save_dir = 'wisdm-dataset/np_data'
+        if not os.path.isdir(np_dir):
+            os.makedirs(np_dir)
+
         mp.dps = 100 # Avoid floating point errors in label insertion function
         for user_idx in range(1600,1651):
             phone_acc_path = os.path.join(p_dir,'accel',f'data_{user_idx}_accel_phone.txt')
