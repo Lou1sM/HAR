@@ -1,7 +1,6 @@
 import sys
 from hmmlearn import hmm
 from copy import deepcopy
-from scipy import stats
 import os
 import argparse
 import math
@@ -12,9 +11,9 @@ import numpy as np
 import time
 from torch.utils import data
 from dl_utils.misc import asMinutes, np_save
-from dl_utils.label_funcs import accuracy, mean_f1, debable, translate_labellings, compress_labels, get_num_labels, label_counts, dummy_labels, unique_labels, get_trans_dict
-from dl_utils.tensor_funcs import noiseify, numpyify
-from make_dsets import make_dset_train_val, make_dsets_by_user, ChunkDataset, combine_dsets
+from dl_utils.label_funcs import accuracy, mean_f1, debable, translate_labellings, get_num_labels, label_counts, dummy_labels, avoid_minus_ones_lf_wrapper,masked_mode,acc_by_label
+from dl_utils.tensor_funcs import noiseify, numpyify, cudify
+from make_dsets import make_dset_train_val, make_dsets_by_user
 from sklearn.metrics import normalized_mutual_info_score,adjusted_rand_score
 
 
@@ -226,58 +225,6 @@ class HARLearner():
                 torch.nn.init.ones_(m.weight.data)
                 torch.nn.init.zeros_(m.bias.data)
 
-    def cross_train(self,user_dsets,num_epochs,frac_gt_labels,exp_dir):
-        results_matrix = np.zeros((len(user_dsets),len(user_dsets)))
-        pred_predee = [[] for _ in range(len(user_dsets))]
-        self_diag_preds = []
-        for dset_idx,(dset,sa) in enumerate(user_dsets.values()):
-            all_user_preds = {}
-            n = get_num_labels(dset.y)
-            if n != self.num_classes and ARGS.fussy_label_numbers:
-                print(f"Not training on {dset_idx} because only {n} labels, should be {self.num_classes}")
-                continue
-            acc, f1, pred_array = self.train_with_fract_gts_on(dset,num_epochs,frac_gt_labels,reinit=True)
-            self_diag_preds.append(pred_array)
-            results_matrix[dset_idx,dset_idx] = round(acc,4)
-            for dset_idx_val,(dset_val,sa) in enumerate(user_dsets.values()):
-                if dset_idx_val == dset_idx: continue
-                acc_val, f1_val, pred_array_ordered_val = self.val_on(dset_val)
-                pred_predee[dset_idx_val].append(pred_array_ordered_val)
-                results_matrix[dset_idx,dset_idx_val] = round(acc_val,4)
-        pseudo_label_dsets = []
-        for dset_idx,(dset,sa) in enumerate(user_dsets.values()):
-            preds = pred_predee[dset_idx]
-            gt_labels = dset.y.detach().cpu().numpy()
-            pred_list_translated =  preds if ARGS.test else debable(preds,pivot=gt_labels)
-            pred_array = np.stack(pred_list_translated)
-            mode_ensemble_preds = stats.mode(pred_array,axis=0).mode[0]
-            full_ensemble_acc = -1 if ARGS.test else accuracy(mode_ensemble_preds,gt_labels)
-            all_agrees = np.ones(len(dset)).astype(np.bool) if ARGS.test else np.all(pred_array==pred_array[0,:], axis=0)
-            agreed_preds = mode_ensemble_preds[all_agrees]
-            agreed_gt_labels = gt_labels[all_agrees]
-            all_agree_ensemble_acc = -1 if ARGS.test or not all_agrees.any() else accuracy(agreed_preds,agreed_gt_labels)
-            print(f"Ensemble acc on {dset_idx}: {full_ensemble_acc}, {all_agree_ensemble_acc} {all_agrees.sum()/len(all_agrees)}")
-            pseudo_label_dset = deepcopy(dset)
-            pseudo_label_dsets.append((pseudo_label_dset,all_agrees))
-            # Convert pred_array to multihot form
-            multihot_pred_array = np.stack([(pred_array==lab).sum(axis=0) for lab in range(self.num_classes)])
-            temperature = .5
-            ensemble_prob_tensor = cudify(multihot_pred_array*temperature).float().softmax(dim=0)
-            all_agrees_t = cudify(all_agrees)
-            prob_mask = npify(ensemble_prob_tensor.max(axis=0)[0])
-            acc, pseudo_label_pred_array = self.pseudo_label_meta_loop(pseudo_label_dset,mode_ensemble_preds,num_meta_epochs=ARGS.num_pseudo_label_epochs,ensemble_mask=prob_mask)
-            val_acc, val_f1, val_pred_array = self.val_on(dset)
-            print("ensemble_preds label_counts on agreed points:", label_counts(agreed_preds[agreed_preds==agreed_gt_labels]))
-            print("ensemble_preds label_counts on all points:", label_counts(mode_ensemble_preds))
-            print(f"Acc from pseudo_label training, train: {acc}\tval: {val_acc}")
-            if all_agree_ensemble_acc >= .95:
-                other_acc, other_f1, other_pred_array = self.train_with_fract_gts_on(dset,num_epochs,all_agrees.mean())
-                print(f"Acc from regular frac_gt training with same frac of gts: {other_acc}")
-            print()
-
-        print(results_matrix)
-        return results_matrix
-
     def pseudo_label_cluster_meta_loop(self,dset,meta_pivot_pred_labels,num_meta_epochs,num_pseudo_label_epochs,prob_thresh,selected_acts):
         old_pred_labels = -np.ones(dset.y.shape)
         np_gt_labels = dset.y.detach().cpu().numpy().astype(int)
@@ -332,7 +279,6 @@ class HARLearner():
                 print('Super Masked MLP accuracy:', accuracy(mlp_preds[super_mask],dset.y[super_mask]),super_mask.sum())
             elif epoch_num == num_meta_epochs-1:
                 print(f"Latent: {accuracy(new_pred_labels,np_gt_labels)}\tMaskL: {accuracy(new_pred_labels[mask],y_np[mask]),mask.sum()}\tSuperMaskL{accuracy(new_pred_labels[super_mask],dset.y[super_mask]),super_mask.sum()}")
-            preds_for_printing = translate_labellings(new_pred_labels,np_gt_labels,'none')
             old_pred_labels = deepcopy(new_pred_labels)
         super_super_mask = np.logical_and(super_mask,new_pred_labels==mlp_preds)
         return new_pred_labels, mask, super_mask, super_super_mask
@@ -397,7 +343,7 @@ class HARLearner():
             preds_from_this_user = []
             accs_from_this_user = []
             print(f"training on {user_id}")
-            pseudo_labels, conf_mask, very_conf_mask, very_very_conf_mask  = self.pseudo_label_cluster_meta_loop(user_dset,'none',args.num_cluster_epochs,num_pseudo_label_epochs=args.num_pseudo_label_epochs,prob_thresh=args.prob_thresh,selected_acts=sa)
+            pseudo_labels, conf_mask, very_conf_mask, very_very_conf_mask = self.pseudo_label_cluster_meta_loop(user_dset,'none',args.num_cluster_epochs,num_pseudo_label_epochs=args.num_pseudo_label_epochs,prob_thresh=args.prob_thresh,selected_acts=sa)
             self_accs.append(accuracy(pseudo_labels,numpyify(user_dset.y)))
             for other_user_id, (other_user_dset, sa) in enumerate(user_dsets):
                 acc,f1,preds = self.val_on(other_user_dset)
@@ -425,54 +371,6 @@ def stratified_sample_mask(population_length, sample_frac):
     sample_mask = np.zeros(population_length)
     sample_mask[sample_idx] = 1
     return sample_mask
-
-def masked_mode(pred_array,mask='none'):
-    if mask is 'none':
-        return stats.mode(pred_array,axis=0).mode[0]
-    x = mask.any(axis=0)
-    return np.array([stats.mode([lab for lab,b in zip(pred_array[:,j],mask[:,j]) if b]).mode[0] if bx else -1 for bx,j in zip(x,range(pred_array.shape[1]))])
-
-def recursive_np_or(boolean_arrays):
-    if len(boolean_arrays) == 1: return boolean_arrays[0]
-    return np.logical_or(boolean_arrays[0],recursive_np_or(boolean_arrays[1:]))
-
-def recursive_np_and(boolean_arrays):
-    if len(boolean_arrays) == 1: return boolean_arrays[0]
-    return np.logical_and(boolean_arrays[0],recursive_np_and(boolean_arrays[1:]))
-
-def acc_by_label(labels1, labels2, subsample_size='none'):
-    labels1 = translate_labellings(labels1,labels2,subsample_size)
-    acc_by_labels_from = {}
-    for label in np.unique(labels1):
-        label_preds = labels2[labels1==label]
-        num_correct = (label_preds==label).sum()
-        total_num = len(label_preds)
-        acc_by_labels_from[label] = round(num_correct/total_num,4)
-    acc_by_labels_to = {}
-    for label in np.unique(labels2):
-        label_preds = labels1[labels2==label]
-        num_correct = (label_preds==label).sum()
-        total_num = len(label_preds)
-        acc_by_labels_to[label] = round(num_correct/total_num,4)
-    return acc_by_labels_from, acc_by_labels_to
-
-def avoid_minus_ones_lf_wrapper(lf):
-    def wrapped_lf(pred,target,multiplicative_mask='none'):
-        avoidance_mask = target!=-1
-        loss_array = lf(pred[avoidance_mask],target[avoidance_mask])
-        if multiplicative_mask is not 'none':
-            loss_array *= multiplicative_mask[avoidance_mask]
-        return loss_array.mean()
-    return wrapped_lf
-
-def select_by_label(labelling,labels_to_select_by):
-    return recursive_np_or([labelling==lab for lab in labels_to_select_by])
-
-def true_cross_entropy_with_logits(pred,target):
-    return (-(pred*target).sum(dim=1) + torch.logsumexp(pred,dim=1)).mean()
-
-def cudify(x): return torch.tensor(x,device='cuda')
-def npify(t): return t.detach().cpu().numpy()
 
 def main(args,subj_ids):
     prep_start_time = time.time()
@@ -538,8 +436,8 @@ def main(args,subj_ids):
         dec(lat)
         sys.exit()
 
-    if args.num_classes != -1: num_classes = args.num_classes
-    har = HARLearner(enc=enc,mlp=mlp,dec=dec,batch_size=args.batch_size,num_classes=num_labels)
+    num_classes = args.num_classes if args.num_classes != -1 else num_labels
+    har = HARLearner(enc=enc,mlp=mlp,dec=dec,batch_size=args.batch_size,num_classes=num_classes)
     exp_dir = os.path.join(f'experiments/{args.exp_name}')
 
     train_start_time = time.time()
