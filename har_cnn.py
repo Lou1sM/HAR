@@ -15,6 +15,7 @@ from dl_utils.misc import asMinutes, np_save
 from dl_utils.label_funcs import accuracy, mean_f1, debable, translate_labellings, compress_labels, get_num_labels, label_counts, dummy_labels, unique_labels, get_trans_dict
 from dl_utils.tensor_funcs import noiseify, numpyify
 from make_dsets import make_dset_train_val, make_dsets_by_user, ChunkDataset, combine_dsets
+from sklearn.metrics import normalized_mutual_info_score,adjusted_rand_score
 
 
 class EncByLayer(nn.Module):
@@ -303,7 +304,6 @@ class HARLearner():
                 model.transmat_ = (np.eye(self.num_classes) * (1-prob_new_action)) + (np.ones((self.num_classes,self.num_classes))*prob_new_action/self.num_classes)
                 model.fit(umapped_latents)
                 new_pred_labels = model.predict(umapped_latents)
-                print(label_counts(new_pred_labels))
                 new_pred_probs = model.predict_proba(umapped_latents)
                 mask = new_pred_probs.max(axis=1) >= prob_thresh
                 if ARGS.save: np.save('test_umapped_latents.npy',umapped_latents)
@@ -320,7 +320,6 @@ class HARLearner():
             super_mask*=mask
             mask_to_use = (mask+super_mask)/2
             mlp_acc,mlp_f1,mlp_preds,mlp_confs = self.train_on(pseudo_label_dset,multiplicative_mask=cudify(mask_to_use),num_epochs=num_pseudo_label_epochs)
-            print(label_counts(mlp_preds))
             y_np = numpyify(dset.y)
             if ARGS.verbose:
                 print('Meta Epoch:', epoch_num)
@@ -333,7 +332,6 @@ class HARLearner():
                 print('Super Masked MLP accuracy:', accuracy(mlp_preds[super_mask],dset.y[super_mask]),super_mask.sum())
             elif epoch_num == num_meta_epochs-1:
                 print(f"Latent: {accuracy(new_pred_labels,np_gt_labels)}\tMaskL: {accuracy(new_pred_labels[mask],y_np[mask]),mask.sum()}\tSuperMaskL{accuracy(new_pred_labels[super_mask],dset.y[super_mask]),super_mask.sum()}")
-            rand_idxs = np.array([15,1777,1982,9834,11243,25,7777,5982,5834,250,7717,5912,5134])
             preds_for_printing = translate_labellings(new_pred_labels,np_gt_labels,'none')
             old_pred_labels = deepcopy(new_pred_labels)
         super_super_mask = np.logical_and(super_mask,new_pred_labels==mlp_preds)
@@ -372,7 +370,9 @@ class HARLearner():
             best_preds_so_far[got_by_super_super_masks] = super_super_mask_mode_preds[got_by_super_super_masks]
             assert not (best_preds_so_far==-1).any()
             best_acc = accuracy(best_preds_so_far,y_np)
-            print('Acc of best so far',best_acc)
+            best_nmi = normalized_mutual_info_score(best_preds_so_far,y_np)
+            best_rand_idx = adjusted_rand_score(best_preds_so_far,y_np)
+            print('Results of best so far',best_acc,best_nmi,best_rand_idx)
 
         surely_correct = np.stack(super_mask_histories).all(axis=0)
         macc = lambda mask: accuracy(best_preds_so_far[mask],y_np[mask])
@@ -387,138 +387,32 @@ class HARLearner():
             np_save('super_mask_histories.npy',np.stack(super_mask_histories))
             np_save('mask_histories.npy',np.stack(mask_histories))
             np_save('preds_histories.npy',np.stack(preds_histories))
+        return best_acc, best_nmi, best_rand_idx
 
     def full_train(self,user_dsets,args):
         preds_from_users_list = []
-        accs = []
-        accs_from_others = []
+        accs_from_users_list = []
         self_accs = []
         for user_id, (user_dset, sa) in enumerate(user_dsets):
+            preds_from_this_user = []
+            accs_from_this_user = []
             print(f"training on {user_id}")
-            pseudo_labels, conf_mask, very_conf_mask, very_very_conf_mask  = self.pseudo_label_cluster_meta_loop(user_dset,'none',args.num_cluster_epochs,num_pseudo_label_epochs=5,prob_thresh=args.prob_thresh,selected_acts=sa)
+            pseudo_labels, conf_mask, very_conf_mask, very_very_conf_mask  = self.pseudo_label_cluster_meta_loop(user_dset,'none',args.num_cluster_epochs,num_pseudo_label_epochs=args.num_pseudo_label_epochs,prob_thresh=args.prob_thresh,selected_acts=sa)
             self_accs.append(accuracy(pseudo_labels,numpyify(user_dset.y)))
-            pseudo_label_dset = deepcopy(user_dset)
-            others_dsets = [udset for uid, (udset,sa) in enumerate(user_dsets) if uid!=user_id]
-            if len(others_dsets) <= 1: print("not enough dsets to full_train, specify more subj_ids"); sys.exit()
-            combined_other_dsets = combine_dsets(others_dsets)
-            mask_for_others = stratified_sample_mask(len(combined_other_dsets),args.frac_gt_labels)
-            acc,f1,preds,confs=self.train_on(combined_other_dsets,args.num_pseudo_label_epochs,cudify(mask_for_others))
-            acc_,f1_,others_language_pseudo_label_preds = self.val_on(pseudo_label_dset)
-            translated_pseudo_labels = translate_labellings(pseudo_labels,others_language_pseudo_label_preds,'none')
-            pseudo_label_dset.y = cudify(translated_pseudo_labels)
-            gt_translation = translate_labellings(pseudo_labels,others_language_pseudo_label_preds)
-            translation_accuracy = (translated_pseudo_labels==gt_translation).mean()
-            if translation_accuracy<1: print("translation acc is only {translation_accuracy}")
-            acc_others,f1_others,preds_others = self.val_on(user_dset)
-            print(label_counts(numpyify(user_dset.y)))
-            print(f"acc from just others: {acc_others}")
-            accs_from_others.append(acc_others)
-            full_train_dsets = others_dsets + [pseudo_label_dset]
-            full_combined_dsets = combine_dsets(full_train_dsets)
-            mask = cudify(np.concatenate([mask_for_others,very_conf_mask]))
-            self.train_on(full_combined_dsets,args.num_pseudo_label_epochs,mask)
-            acc,f1,preds = self.val_on(user_dset)
-            print(f"acc when add pseudo labels: {acc}")
-            accs.append(acc)
+            for other_user_id, (other_user_dset, sa) in enumerate(user_dsets):
+                acc,f1,preds = self.val_on(other_user_dset)
+                accs_from_this_user.append(acc)
+                preds_from_this_user.append(preds)
+            preds_from_users_list.append(np.concatenate(preds_from_this_user))
+            accs_from_users_list.append(accs_from_this_user)
+        mega_ultra_preds = np.stack(preds_from_users_list)
+        debabled_mega_ultra_preds = debable(mega_ultra_preds,'none')
+        start_idxs = [sum([len(d) for d,sa in user_dsets[:i]]) for i in range(len(user_dsets)+1)]
+        debabled_self_preds = [debabled_mega_ultra_preds[uid][start_idxs[uid]:start_idxs[uid+1]] for uid in range(len(user_dsets))]
+        true_accs = [accuracy(p,numpyify(d.y)) for p,(d,sa) in zip(debabled_self_preds,user_dsets)]
         total_num_dpoints = sum(len(ud) for ud,sa in user_dsets)
-        for n,acc_list in zip((accs_from_others,self_accs,accs),('others','self','both')):
+        for n,acc_list in zip(('reflexive','legit'),(self_accs,true_accs)):
             print(n,sum([a*len(ud) for a, (ud, sa) in zip(acc_list, user_dsets)])/total_num_dpoints)
-
-    def load_and_find_hard_classes(self,dset,args):
-        super_super_mask_histories = np.stack(np.load('super_super_masks.npy'))
-        preds_histories = np.stack(np.load('preds.npy'))
-        masked_mode_preds = masked_mode(preds_histories,super_super_mask_histories)
-        got_by_super_super_masks = super_super_mask_histories.any(axis=0)
-        y_np = numpyify(dset.y).astype(int)
-        labels_with_enough_preds = unique_labels(masked_mode_preds[got_by_super_super_masks])
-        labels_without_enough_preds = [k for k in unique_labels(y_np) if k not in labels_with_enough_preds]
-        simplified_labels, compress_dict1, changed = compress_labels(masked_mode_preds)
-        catch_all_label = get_num_labels(masked_mode_preds[got_by_super_super_masks])
-        assert catch_all_label not in labels_with_enough_preds and catch_all_label-1 in unique_labels(simplified_labels)
-
-        likely_hard_class_histories = np.zeros(len(dset)).astype(np.bool)
-        for hard_class in labels_without_enough_preds:
-            class_mask = masked_mode_preds==hard_class
-            likely_hard_class_histories = np.logical_or(likely_hard_class_histories,class_mask)
-        likely_hard_class = likely_hard_class_histories.all(axis=0)
-
-        simplified_labels[likely_hard_class] = catch_all_label
-        train_mask = np.logical_or(got_by_super_super_masks,likely_hard_class).astype(float)
-        not_to_be_trained_on = simplified_labels==-1
-        #simplified_labels[not_to_be_trained_on] = catch_all_label # Can't have -1's when training, these points will be masked out anyway
-        pseudo_label_dset = deepcopy(dset)
-        pseudo_label_dset.y = cudify(simplified_labels)
-        gt_trans_dict = {}
-
-        tmp_label = max(y_np) + 1
-        assert ~(y_np==tmp_label).any() and (y_np==(tmp_label-1)).any()
-        for lab in unique_labels(y_np): # Keep labels the same in surely correct, others will be changed to catch_all
-            if lab in unique_labels(y_np[got_by_super_super_masks]): gt_trans_dict[lab] = lab
-            else: gt_trans_dict[lab] = tmp_label
-        simplified_gt = np.array([gt_trans_dict[lab] for lab in y_np])
-        simplified_gt, compress_dict, changed = compress_labels(simplified_gt)
-        if compress_dict[tmp_label] != catch_all_label:
-            print(f"Warning: the preds contain {catch_all_label} unique labels, but the corresponding gts, only {compress_dict[tmp_label]}")
-            compress_dict[tmp_label] = catch_all_label
-
-        x, _ = get_trans_dict(masked_mode_preds[got_by_super_super_masks],y_np[got_by_super_super_masks],'none')
-        x1, _ = get_trans_dict(simplified_labels[got_by_super_super_masks],simplified_gt[got_by_super_super_masks],'none')
-        for lab in unique_labels(masked_mode_preds[got_by_super_super_masks]): x1[compress_dict1[lab]], compress_dict[x[lab]]
-        num_conf_labels = len(labels_with_enough_preds)
-        descale_catch_all_label_by = 100*likely_hard_class.sum()*num_conf_labels/got_by_super_super_masks.sum()
-        train_mask[likely_hard_class] /= descale_catch_all_label_by
-        assert (train_mask[np.logical_and(simplified_labels==catch_all_label,~not_to_be_trained_on)] == 1/descale_catch_all_label_by).all()
-        self.mlp = Var_BS_MLP(32,25,num_conf_labels+1).cuda() # Plus one is for the catch_all_label
-        self.mlp_opt = torch.optim.Adam(self.mlp.parameters(),lr=ARGS.mlp_lr)
-        acc, f1, train_preds, train_confs = self.train_on(pseudo_label_dset,args.num_pseudo_label_epochs,multiplicative_mask=cudify(train_mask),rlmbda=0)
-        print(acc_by_label(train_preds,simplified_gt))
-        print(label_counts(simplified_gt[train_preds==catch_all_label]))
-        v_likely_hard_class = train_preds == 5
-        vv_likely_hard_class = v_likely_hard_class
-        thresh = 0
-        set_trace()
-        # Select the most confident half of those assigned to catch_all_label
-        while vv_likely_hard_class.sum() > len(dset)*len(labels_without_enough_preds)/(self.num_classes*2):
-            thresh += 0.1
-            vv_likely_hard_class = np.logical_and(v_likely_hard_class,train_confs>thresh)
-        np.save('vv_likely_hard_class.npy',vv_likely_hard_class)
-        print(acc,f1)
-
-    def find_similar_users(self,user_dsets,args):
-        preds_from_users_list = []
-        accs = []
-        all_similar_users = []
-        for user_id, (user_dset, sa) in enumerate(user_dsets):
-            user_accs = []
-            print(f"training on {user_id}")
-            self.train_with_fract_gts_on(user_dset,args.num_pseudo_label_epochs,args.frac_gt_labels)
-            for other_id, (other_dset, sa) in enumerate(user_dsets):
-                acc,f1,preds = self.val_on(other_dset)
-                user_accs.append(acc)
-            accs.append(user_accs)
-            most_similar_users = numpyify(torch.topk(torch.tensor(user_accs),5)[1]).tolist()
-            print(most_similar_users)
-            if user_id in most_similar_users: most_similar_users.remove(user_id)
-            all_similar_users.append(most_similar_users)
-        full_accs = []
-        for user_id, (user_dset, sa) in enumerate(user_dsets):
-            others_dsets = [udset for uid, (udset,sa) in enumerate(user_dsets) if uid!=user_id]
-            combined_other_dsets = combine_dsets(others_dsets)
-            acc,f1,preds,confs=self.train_with_fract_gts_on(combined_other_dsets,args.num_pseudo_label_epochs,args.frac_gt_labels)
-            acc,f1,preds = self.val_on(user_dset)
-            full_accs.append(acc)
-        accs.append(full_accs)
-        similars_accs = []
-        for user_id, (user_dset, sa) in enumerate(user_dsets):
-            similars = all_similar_users[user_id]
-            others_dsets = [udset for uid, (udset,sa) in enumerate(user_dsets) if uid in similars]
-            combined_other_dsets = combine_dsets(others_dsets)
-            acc,f1,preds,confs=self.train_with_fract_gts_on(combined_other_dsets,args.num_pseudo_label_epochs*2,args.frac_gt_labels)
-            acc,f1,preds = self.val_on(user_dset)
-            similars_accs.append(acc)
-        accs.append(similars_accs)
-        acc_mat = np.array(accs)
-        print(acc_mat)
 
 def stratified_sample_mask(population_length, sample_frac):
     if sample_frac == 0:
@@ -671,10 +565,15 @@ def main(args,subj_ids):
         print("CLUSTERING AS SINGLE DSET")
         har.pseudo_label_cluster_meta_meta_loop(dset_train,args.num_meta_meta_epochs,args.num_meta_epochs,args.num_pseudo_label_epochs,args.prob_thresh,selected_acts)
     elif args.train_type == 'cluster_individually':
-        print("CLUSTERING AS EACH DSET SEPARATELY")
+        print("CLUSTERING EACH DSET SEPARATELY")
+        accs, nmis, rand_idxs = [], [], []
         for user_id, (dset,sa) in enumerate(dsets_by_id):
             print("clustering", user_id)
-            har.pseudo_label_cluster_meta_meta_loop(dset,args.num_meta_meta_epochs,args.num_meta_epochs,args.num_pseudo_label_epochs,args.prob_thresh,selected_acts)
+            acc, nmi, rand_idx = har.pseudo_label_cluster_meta_meta_loop(dset,args.num_meta_meta_epochs,args.num_meta_epochs,args.num_pseudo_label_epochs,args.prob_thresh,selected_acts)
+            accs.append(acc); nmis.append(nmi); rand_idxs.append(rand_idx)
+        for t in zip(accs,nmis,rand_idxs):
+            print(t)
+        print(f"{sum(accs)/len(accs)}\tNMIs: {sum(nmis)/len(nmis)}\tRAND IDXs: {sum(rand_idxs)/len(rand_idxs)}")
     train_end_time = time.time()
     total_prep_time = asMinutes(train_start_time-prep_start_time)
     total_train_time = asMinutes(train_end_time-train_start_time)
@@ -720,7 +619,7 @@ if __name__ == "__main__":
     parser.add_argument('--sub_train',action='store_true')
     parser.add_argument('--suppress_prints',action='store_true')
     parser.add_argument('--test','-t',action='store_true')
-    parser.add_argument('--train_type',type=str,choices=training_type_options,default='cluster_individually')
+    parser.add_argument('--train_type',type=str,choices=training_type_options,default='full')
     parser.add_argument('--show_shapes',action='store_true',help='print the shapes of hidden layers in enc and dec')
     parser.add_argument('--verbose',action='store_true')
     parser.add_argument('--window_size',type=int,default=512)
