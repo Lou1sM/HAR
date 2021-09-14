@@ -178,7 +178,6 @@ class HARLearner():
         if abs(approx - frac_gt_labels) > .01:
             print(f"frac_gts approximation is {approx}, instead of {frac_gt_labels}")
         return self.train_on(dset,num_epochs,gt_mask,reinit=reinit,rlmbda=rlmbda)
-
     def val_on(self,dset):
         self.enc.eval()
         self.dec.eval()
@@ -256,7 +255,7 @@ class HARLearner():
                 if ARGS.save: np.save('test_umapped_latents.npy',umapped_latents)
                 if meta_pivot_pred_labels is not 'none':
                     new_pred_labels = translate_labellings(new_pred_labels,meta_pivot_pred_labels,subsample_size=30000)
-                elif epoch_num >0:
+                elif epoch_num > 0:
                     new_pred_labels = translate_labellings(new_pred_labels,old_pred_labels,subsample_size=30000)
             pseudo_label_dset = deepcopy(dset)
             pseudo_label_dset.y = cudify(new_pred_labels)
@@ -385,7 +384,7 @@ def main(args,subj_ids):
         y_filters_trans = (8,8,6,6)
         x_strides_trans = (1,2,2,2)
         y_strides_trans = (1,1,2,1)
-        num_labels = 12
+        true_num_classes = 12
     elif args.dset == 'UCI':
         x_filters = (60,40,4,4)
         x_strides = (2,2,1,1)
@@ -396,7 +395,7 @@ def main(args,subj_ids):
         x_strides_trans = (1,3,2,2)
         y_filters_trans = (2,2,2,2)
         y_strides_trans = (2,2,1,1)
-        num_labels = 6
+        true_num_classes = 6
     elif args.dset == 'WISDM-v1':
         x_filters = (50,40,5,4)
         y_filters = (1,1,2,2)
@@ -407,7 +406,7 @@ def main(args,subj_ids):
         y_filters_trans = (2,2,1,1)
         x_strides_trans = (1,3,2,2)
         y_strides_trans = (1,1,1,1)
-        num_labels = 5
+        true_num_classes = 5
     elif args.dset == 'WISDM-watch':
         x_filters = (50,40,8,6)
         y_filters = (2,2,2,2)
@@ -418,10 +417,11 @@ def main(args,subj_ids):
         y_filters_trans = (2,2,2,2)
         x_strides_trans = (1,3,2,2)
         y_strides_trans = (1,1,2,2)
-        num_labels = 17
+        true_num_classes = 17
+    num_classes = args.num_classes if args.num_classes != -1 else true_num_classes
     enc = EncByLayer(x_filters,y_filters,x_strides,y_strides,max_pools,show_shapes=args.show_shapes)
     dec = DecByLayer(x_filters_trans,y_filters_trans,x_strides_trans,y_strides_trans,show_shapes=args.show_shapes)
-    mlp = Var_BS_MLP(32,25,num_labels)
+    mlp = Var_BS_MLP(32,25,num_classes)
     if args.load_pretrained:
         enc.load_state_dict(torch.load('enc_pretrained.pt'))
         mlp.load_state_dict(torch.load('dec_pretrained.pt'))
@@ -436,7 +436,6 @@ def main(args,subj_ids):
         dec(lat)
         sys.exit()
 
-    num_classes = args.num_classes if args.num_classes != -1 else num_labels
     har = HARLearner(enc=enc,mlp=mlp,dec=dec,batch_size=args.batch_size,num_classes=num_classes)
     exp_dir = os.path.join(f'experiments/{args.exp_name}')
 
@@ -445,8 +444,8 @@ def main(args,subj_ids):
     bad_ids = []
     for user_id, (dset,sa) in dsets_by_id.items():
         n = get_num_labels(dset.y)
-        if n < num_labels/2:
-            print(f"Excluding user {user_id}, only has {n} different labels, instead of {num_labels}")
+        if n < true_num_classes/2:
+            print(f"Excluding user {user_id}, only has {n} different labels, instead of {num_classes}")
             bad_ids.append(user_id)
     dsets_by_id = [v for k,v in dsets_by_id.items() if k not in bad_ids]
     if args.train_type == 'train_frac_gts_as_single':
