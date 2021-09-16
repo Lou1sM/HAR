@@ -338,12 +338,14 @@ class HARLearner():
         preds_from_users_list = []
         accs_from_users_list = []
         self_accs = []
+        self_f1s = []
         for user_id, (user_dset, sa) in enumerate(user_dsets):
             preds_from_this_user = []
             accs_from_this_user = []
             print(f"training on {user_id}")
             pseudo_labels, conf_mask, very_conf_mask, very_very_conf_mask = self.pseudo_label_cluster_meta_loop(user_dset,'none',args.num_cluster_epochs,num_pseudo_label_epochs=args.num_pseudo_label_epochs,prob_thresh=args.prob_thresh,selected_acts=sa)
             self_accs.append(accuracy(pseudo_labels,numpyify(user_dset.y)))
+            self_f1s.append(mean_f1(pseudo_labels,numpyify(user_dset.y)))
             for other_user_id, (other_user_dset, sa) in enumerate(user_dsets):
                 acc,f1,preds = self.val_on(other_user_dset)
                 accs_from_this_user.append(acc)
@@ -355,9 +357,17 @@ class HARLearner():
         start_idxs = [sum([len(d) for d,sa in user_dsets[:i]]) for i in range(len(user_dsets)+1)]
         debabled_self_preds = [debabled_mega_ultra_preds[uid][start_idxs[uid]:start_idxs[uid+1]] for uid in range(len(user_dsets))]
         true_accs = [accuracy(p,numpyify(d.y)) for p,(d,sa) in zip(debabled_self_preds,user_dsets)]
+        true_f1s = [mean_f1(p,numpyify(d.y)) for p,(d,sa) in zip(debabled_self_preds,user_dsets)]
         total_num_dpoints = sum(len(ud) for ud,sa in user_dsets)
-        for n,acc_list in zip(('reflexive','legit'),(self_accs,true_accs)):
-            print(n,sum([a*len(ud) for a, (ud, sa) in zip(acc_list, user_dsets)])/total_num_dpoints)
+        with open(f'experiments/{args.exp_name}/results.txt','w') as f:
+            for n,acc_list in zip(('reflexive','legit'),(self_accs,true_accs)):
+                avg_acc = sum([a*len(ud) for a, (ud, sa) in zip(acc_list, user_dsets)])/total_num_dpoints
+                print(f'Acc {n}: {avg_acc}')
+                f.write(f'Acc {n}: {avg_acc}')
+            for n,f1_list in zip(('reflexive','legit'),(self_f1s,true_f1s)):
+                avg_f1 = sum([a*len(ud) for a, (ud, sa) in zip(f1_list, user_dsets)])/total_num_dpoints
+                print(f'F1 {n}: {avg_f1}')
+                f.write(f'F1 {n}: {avg_f1}')
 
 def stratified_sample_mask(population_length, sample_frac):
     if sample_frac == 0:
@@ -437,7 +447,6 @@ def main(args,subj_ids):
         sys.exit()
 
     har = HARLearner(enc=enc,mlp=mlp,dec=dec,batch_size=args.batch_size,num_classes=num_classes)
-    exp_dir = os.path.join(f'experiments/{args.exp_name}')
 
     train_start_time = time.time()
     dsets_by_id = make_dsets_by_user(args,subj_ids)
@@ -491,7 +500,7 @@ if __name__ == "__main__":
     parser.add_argument('--dec_lr',type=float,default=1e-3)
     parser.add_argument('--dset',type=str,default='PAMAP',choices=dset_options)
     parser.add_argument('--enc_lr',type=float,default=1e-3)
-    parser.add_argument('--exp_name',type=str,default="jim")
+    parser.add_argument('--exp_name',type=str,default="try")
     parser.add_argument('--frac_gt_labels',type=float,default=0.1)
     parser.add_argument('--fussy_label_numbers',action='store_true')
     parser.add_argument('--gpu',type=str,default='0')
@@ -510,7 +519,6 @@ if __name__ == "__main__":
     parser.add_argument('--parallel',action='store_true')
     parser.add_argument('--prob_thresh',type=float,default=.95)
     parser.add_argument('--rlmbda',type=float,default=.1)
-    parser.add_argument('--save','-s',action='store_true')
     parser.add_argument('--short_epochs',action='store_true')
     parser.add_argument('--step_size',type=int,default=5)
     parser.add_argument('--sub_train',action='store_true')
