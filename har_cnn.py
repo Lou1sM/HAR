@@ -2,7 +2,6 @@ import sys
 from hmmlearn import hmm
 from copy import deepcopy
 import os
-import argparse
 import math
 from pdb import set_trace
 import torch
@@ -10,7 +9,8 @@ import torch.nn as nn
 import numpy as np
 import time
 from torch.utils import data
-from dl_utils.misc import asMinutes, np_save
+import cl_args
+from dl_utils.misc import asMinutes,check_dir
 from dl_utils.label_funcs import accuracy, mean_f1, debable, translate_labellings, get_num_labels, label_counts, dummy_labels, avoid_minus_ones_lf_wrapper,masked_mode,acc_by_label
 from dl_utils.tensor_funcs import noiseify, numpyify, cudify
 from make_dsets import make_dset_train_val, make_dsets_by_user
@@ -139,7 +139,7 @@ class HARLearner():
                 if math.isnan(loss): set_trace()
                 if rlmbda>0:
                     rec_loss = self.rec_lf(self.dec(latent),xb).mean()
-                    loss += rec_loss
+                    loss += rlmbda*rec_loss
                 loss.backward()
                 self.enc_opt.step(); self.enc_opt.zero_grad()
                 self.mlp_opt.step(); self.mlp_opt.zero_grad()
@@ -252,7 +252,6 @@ class HARLearner():
                 new_pred_labels = model.predict(umapped_latents)
                 new_pred_probs = model.predict_proba(umapped_latents)
                 mask = new_pred_probs.max(axis=1) >= prob_thresh
-                if ARGS.save: np.save('test_umapped_latents.npy',umapped_latents)
                 if meta_pivot_pred_labels is not 'none':
                     new_pred_labels = translate_labellings(new_pred_labels,meta_pivot_pred_labels,subsample_size=30000)
                 elif epoch_num > 0:
@@ -327,12 +326,7 @@ class HARLearner():
         print(f"Label counts missed by super masks: {label_counts(y_np[~got_by_super_masks])}")
         print(f"Surely corrects: {macc(surely_correct)}")
         print(acc_by_label(best_preds_so_far[surely_correct],y_np[surely_correct]))
-        if ARGS.save:
-            np_save('super_super_mask_histories.npy',np.stack(super_super_mask_histories))
-            np_save('super_mask_histories.npy',np.stack(super_mask_histories))
-            np_save('mask_histories.npy',np.stack(mask_histories))
-            np_save('preds_histories.npy',np.stack(preds_histories))
-        return best_acc, best_nmi, best_rand_idx
+        return best_preds_so_far
 
     def full_train(self,user_dsets,args):
         preds_from_users_list = []
@@ -343,7 +337,7 @@ class HARLearner():
             preds_from_this_user = []
             accs_from_this_user = []
             print(f"training on {user_id}")
-            pseudo_labels, conf_mask, very_conf_mask, very_very_conf_mask = self.pseudo_label_cluster_meta_loop(user_dset,'none',args.num_cluster_epochs,num_pseudo_label_epochs=args.num_pseudo_label_epochs,prob_thresh=args.prob_thresh,selected_acts=sa)
+            pseudo_labels = self.pseudo_label_cluster_meta_meta_loop(user_dset,num_meta_meta_epochs=args.num_meta_meta_epochs,num_meta_epochs=args.num_meta_epochs,num_pseudo_label_epochs=args.num_pseudo_label_epochs,prob_thresh=args.prob_thresh,selected_acts=sa)
             self_accs.append(accuracy(pseudo_labels,numpyify(user_dset.y)))
             self_f1s.append(mean_f1(pseudo_labels,numpyify(user_dset.y)))
             for other_user_id, (other_user_dset, sa) in enumerate(user_dsets):
@@ -359,15 +353,22 @@ class HARLearner():
         true_accs = [accuracy(p,numpyify(d.y)) for p,(d,sa) in zip(debabled_self_preds,user_dsets)]
         true_f1s = [mean_f1(p,numpyify(d.y)) for p,(d,sa) in zip(debabled_self_preds,user_dsets)]
         total_num_dpoints = sum(len(ud) for ud,sa in user_dsets)
+        check_dir(f'experiments/{args.exp_name}')
         with open(f'experiments/{args.exp_name}/results.txt','w') as f:
             for n,acc_list in zip(('reflexive','legit'),(self_accs,true_accs)):
                 avg_acc = sum([a*len(ud) for a, (ud, sa) in zip(acc_list, user_dsets)])/total_num_dpoints
-                print(f'Acc {n}: {avg_acc}')
-                f.write(f'Acc {n}: {avg_acc}')
+                print(f'Acc {n}: {round(avg_acc,5)}')
+                f.write(f'Acc {n}: {round(avg_acc,5)}\n')
             for n,f1_list in zip(('reflexive','legit'),(self_f1s,true_f1s)):
                 avg_f1 = sum([a*len(ud) for a, (ud, sa) in zip(f1_list, user_dsets)])/total_num_dpoints
-                print(f'F1 {n}: {avg_f1}')
-                f.write(f'F1 {n}: {avg_f1}')
+                print(f'F1 {n}: {round(avg_f1,5)}')
+                f.write(f'F1 {n}: {round(avg_f1,5)}\n')
+            f.write('\nAll accs\n')
+            f.write(' '.join([str(a) for a in true_accs])+'\n')
+            f.write('All f1s\n')
+            f.write(' '.join([str(f) for f in true_f1s]))
+            for relevant_arg in cl_args.RELEVANT_ARGS:
+                f.write(f"\n{relevant_arg}: {vars(ARGS).get(relevant_arg)}")
 
 def stratified_sample_mask(population_length, sample_frac):
     if sample_frac == 0:
@@ -381,7 +382,7 @@ def stratified_sample_mask(population_length, sample_frac):
     sample_mask[sample_idx] = 1
     return sample_mask
 
-def main(args,subj_ids):
+def main(args):
     prep_start_time = time.time()
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
     if args.dset == 'PAMAP':
@@ -438,6 +439,7 @@ def main(args,subj_ids):
     enc.cuda()
     dec.cuda()
     mlp.cuda()
+    subj_ids = args.subj_ids
     dset_train, dset_val, selected_acts = make_dset_train_val(args,subj_ids)
     if args.show_shapes:
         num_ftrs = dset_train.x.shape[-1]
@@ -488,74 +490,6 @@ def main(args,subj_ids):
 
 if __name__ == "__main__":
 
-    dset_options = ['PAMAP','UCI','WISDM-v1','WISDM-watch']
-    training_type_options = ['full','cluster_as_single','cluster_individually','train_frac_gts_as_single','find_similar_users']
-    parser = argparse.ArgumentParser()
-    group = parser.add_mutually_exclusive_group(required=False)
-    group.add_argument('--num_subjs',type=int)
-    group.add_argument('--subj_ids',type=str,nargs='+',default=['first'])
-    parser.add_argument('--all_subjs',action='store_true')
-    parser.add_argument('--alpha',type=float,default=.5)
-    parser.add_argument('--batch_size',type=int,default=128)
-    parser.add_argument('--dec_lr',type=float,default=1e-3)
-    parser.add_argument('--dset',type=str,default='PAMAP',choices=dset_options)
-    parser.add_argument('--enc_lr',type=float,default=1e-3)
-    parser.add_argument('--exp_name',type=str,default="try")
-    parser.add_argument('--frac_gt_labels',type=float,default=0.1)
-    parser.add_argument('--fussy_label_numbers',action='store_true')
-    parser.add_argument('--gpu',type=str,default='0')
-    parser.add_argument('--load_and_find',action='store_true')
-    parser.add_argument('--load_and_try',action='store_true')
-    parser.add_argument('--load_pretrained',action='store_true')
-    parser.add_argument('--mlp_lr',type=float,default=1e-3)
-    parser.add_argument('--no_umap',action='store_true')
-    parser.add_argument('--noise',type=float,default=1.)
-    parser.add_argument('--num_epochs',type=int,default=30)
-    parser.add_argument('--num_meta_epochs',type=int,default=4)
-    parser.add_argument('--num_meta_meta_epochs',type=int,default=4)
-    parser.add_argument('--num_pseudo_label_epochs',type=int,default=3)
-    parser.add_argument('--num_classes',type=int,default=-1)
-    parser.add_argument('--num_cluster_epochs',type=int,default=5)
-    parser.add_argument('--parallel',action='store_true')
-    parser.add_argument('--prob_thresh',type=float,default=.95)
-    parser.add_argument('--rlmbda',type=float,default=.1)
-    parser.add_argument('--short_epochs',action='store_true')
-    parser.add_argument('--step_size',type=int,default=5)
-    parser.add_argument('--sub_train',action='store_true')
-    parser.add_argument('--suppress_prints',action='store_true')
-    parser.add_argument('--test','-t',action='store_true')
-    parser.add_argument('--train_type',type=str,choices=training_type_options,default='full')
-    parser.add_argument('--show_shapes',action='store_true',help='print the shapes of hidden layers in enc and dec')
-    parser.add_argument('--verbose',action='store_true')
-    parser.add_argument('--window_size',type=int,default=512)
-    ARGS = parser.parse_args()
-
-    if ARGS.test and ARGS.save:
-        print("Shouldn't be saving for a test run"); sys.exit()
-    if ARGS.test:
-        ARGS.num_meta_epochs = 1
-        ARGS.num_meta_meta_epochs = 1
-        ARGS.num_cluster_epochs = 1
-        ARGS.num_pseudo_label_epochs = 1
-    elif not ARGS.no_umap and not ARGS.show_shapes: import umap
-    if ARGS.short_epochs:
-        ARGS.num_meta_epochs = 1
-        ARGS.num_cluster_epochs = 1
-        ARGS.num_pseudo_label_epochs = 1
-    if ARGS.dset == 'PAMAP':
-        all_possible_ids = [str(x) for x in range(101,110)]
-    elif ARGS.dset == 'UCI':
-        def two_digitify(x): return '0' + str(x) if len(str(x))==1 else str(x)
-        all_possible_ids = [two_digitify(x) for x in range(1,30)]
-    elif ARGS.dset == 'WISDM-watch':
-        all_possible_ids = [str(x) for x in range(1600,1651)]
-    elif ARGS.dset == 'WISDM-v1':
-        all_possible_ids = [str(x) for x in range(1,37)] #Paper says 29 users but ids go up to 36
-    if ARGS.all_subjs: subj_ids=all_possible_ids
-    elif ARGS.num_subjs is not None: subj_ids = all_possible_ids[:ARGS.num_subjs]
-    elif ARGS.subj_ids == ['first']: subj_ids = all_possible_ids[:1]
-    else: subj_ids = ARGS.subj_ids
-    bad_ids = [x for x in subj_ids if x not in all_possible_ids]
-    if len(bad_ids) > 0:
-        print(f"You have specified non-existent ids: {bad_ids}"); sys.exit()
-    main(ARGS,subj_ids=subj_ids)
+    ARGS = cl_args.get_cl_args()
+    if not ARGS.test and not ARGS.show_shapes and not ARGS.no_umap: import umap
+    main(ARGS)
