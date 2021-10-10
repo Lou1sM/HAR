@@ -21,7 +21,7 @@ def get_cl_args():
     parser.add_argument('--mlp_lr',type=float,default=1e-3)
     parser.add_argument('--no_umap',action='store_true')
     parser.add_argument('--noise',type=float,default=1.)
-    parser.add_argument('--num_classes',type=int,default=4)
+    parser.add_argument('--num_classes',type=int,default=-1)
     parser.add_argument('--num_meta_epochs',type=int,default=4)
     parser.add_argument('--num_meta_meta_epochs',type=int,default=4)
     parser.add_argument('--num_pseudo_label_epochs',type=int,default=3)
