@@ -321,11 +321,6 @@ class HARLearner():
         surely_correct = np.stack(super_mask_histories).all(axis=0)
         macc = lambda mask: accuracy(best_preds_so_far[mask],y_np[mask])
 
-        print(f"Super masks masked: {accuracy(super_mask_mode_preds[got_by_super_masks],y_np[got_by_super_masks])}, and full: {accuracy(super_mask_mode_preds,y_np)}")
-        print(f"Label counts for just the super masks: {label_counts(super_mask_mode_preds)}")
-        print(f"Label counts missed by super masks: {label_counts(y_np[~got_by_super_masks])}")
-        print(f"Surely corrects: {macc(surely_correct)}")
-        print(acc_by_label(best_preds_so_far[surely_correct],y_np[surely_correct]))
         return best_preds_so_far
 
     def full_train(self,user_dsets,args):
@@ -429,6 +424,17 @@ def main(args):
         x_strides_trans = (1,3,2,2)
         y_strides_trans = (1,1,2,2)
         true_num_classes = 17
+    elif args.dset == 'Capture24':
+        x_filters = (50,40,5,4)
+        y_filters = (1,1,2,2)
+        x_strides = (2,2,1,1)
+        y_strides = (1,1,1,1)
+        max_pools = ((2,1),(3,1),(2,1),1)
+        x_filters_trans = (30,30,20,10)
+        y_filters_trans = (2,2,1,1)
+        x_strides_trans = (1,3,2,2)
+        y_strides_trans = (1,1,1,1)
+        true_num_classes = 10
     num_classes = args.num_classes if args.num_classes != -1 else true_num_classes
     enc = EncByLayer(x_filters,y_filters,x_strides,y_strides,max_pools,show_shapes=args.show_shapes)
     dec = DecByLayer(x_filters_trans,y_filters_trans,x_strides_trans,y_strides_trans,show_shapes=args.show_shapes)
@@ -490,6 +496,6 @@ def main(args):
 
 if __name__ == "__main__":
 
-    ARGS = cl_args.get_cl_args()
-    if not ARGS.test and not ARGS.show_shapes and not ARGS.no_umap: import umap
+    ARGS, need_umap = cl_args.get_cl_args()
+    if need_umap: import umap
     main(ARGS)

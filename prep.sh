@@ -1,3 +1,5 @@
+##!/bin/sh
+
 mkdir -p datasets
 cd datasets
 pwd
@@ -18,6 +20,23 @@ python ../convert_data_to_np.py WISDM-watch
 #wget https://www.cis.fordham.edu/wisdm/includes/datasets/latest/WISDM_ar_latest.tar.gz
 #gunzip WISDM_ar_latest.tar.gz
 #tar -xf WISDM_ar_latest.tar
-#python ../convert_data_to_np.py WISDM-v1
+
+mkdir -p capture24
+cd capture24/
+
+for i in $(seq -w 151)
+do
+    curl -JLO "https://ora.ox.ac.uk/objects/uuid:92650814-a209-4607-9fb5-921eab761c11/download_file?safe_filename=P${i}.csv.gz&type_of_work=Dataset"
+done
+
+curl -JLO "https://ora.ox.ac.uk/objects/uuid:92650814-a209-4607-9fb5-921eab761c11/download_file?safe_filename=metadata.csv&type_of_work=Dataset"
+curl -JLO "https://ora.ox.ac.uk/objects/uuid:92650814-a209-4607-9fb5-921eab761c11/download_file?safe_filename=annotation-label-dictionary.csv&type_of_work=Dataset"
+
+
+for f in $(ls); do 
+    if [ ${f: -2} == "gz" ]; then 
+        gunzip $f; 
+    fi; 
+donepython ../convert_data_to_np.py WISDM-v1
 cd ..
 pwd

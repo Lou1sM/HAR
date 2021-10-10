@@ -3,7 +3,7 @@ import sys
 
 
 def get_cl_args():
-    dset_options = ['PAMAP','UCI','WISDM-v1','WISDM-watch']
+    dset_options = ['PAMAP','UCI','WISDM-v1','WISDM-watch','Capture24']
     training_type_options = ['full','cluster_as_single','cluster_individually','train_frac_gts_as_single','find_similar_users']
     parser = argparse.ArgumentParser()
     group = parser.add_mutually_exclusive_group(required=False)
@@ -36,12 +36,13 @@ def get_cl_args():
     parser.add_argument('--window_size',type=int,default=512)
     ARGS = parser.parse_args()
 
+    need_umap = False
     if ARGS.test:
         ARGS.num_meta_epochs = 1
         ARGS.num_meta_meta_epochs = 1
         ARGS.num_cluster_epochs = 1
         ARGS.num_pseudo_label_epochs = 1
-    elif not ARGS.no_umap and not ARGS.show_shapes: import umap
+    elif not ARGS.no_umap and not ARGS.show_shapes: need_umap = True
     if ARGS.short_epochs:
         ARGS.num_meta_epochs = 1
         ARGS.num_cluster_epochs = 1
@@ -55,12 +56,15 @@ def get_cl_args():
         all_possible_ids = [str(x) for x in range(1,37)] #Paper says 29 users but ids go up to 36
     elif ARGS.dset == 'WISDM-watch':
         all_possible_ids = [str(x) for x in range(1600,1651)]
+    elif ARGS.dset == 'Capture24':
+        all_possible_ids = list(range(1,20))
+    else: print(f"{ARGS.dset} is not a recognized dataset"); sys.exit()
     if ARGS.all_subjs: ARGS.subj_ids=all_possible_ids
     elif ARGS.num_subjs is not None: ARGS.subj_ids = all_possible_ids[:ARGS.num_subjs]
     elif ARGS.subj_ids == ['first']: ARGS.subj_ids = all_possible_ids[:1]
     bad_ids = [x for x in ARGS.subj_ids if x not in all_possible_ids]
     if len(bad_ids) > 0:
         print(f"You have specified non-existent ids: {bad_ids}"); sys.exit()
-    return ARGS
+    return ARGS, need_umap
 
 RELEVANT_ARGS = ['batch_size','dset','enc_lr','dec_lr','frac_gt_labels','mlp_lr','no_umap','noise','num_meta_epochs','num_meta_meta_epochs','num_pseudo_label_epochs','prob_thresh','rlmbda']
