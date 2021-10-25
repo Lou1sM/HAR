@@ -57,14 +57,14 @@ def get_cl_args():
     elif ARGS.dset == 'WISDM-watch':
         all_possible_ids = [str(x) for x in range(1600,1651)]
     elif ARGS.dset == 'Capture24':
-        all_possible_ids = list(range(1,20))
+        all_possible_ids = [str(x) for x in range(1,20)]
     else: print(f"{ARGS.dset} is not a recognized dataset"); sys.exit()
     if ARGS.all_subjs: ARGS.subj_ids=all_possible_ids
     elif ARGS.num_subjs is not None: ARGS.subj_ids = all_possible_ids[:ARGS.num_subjs]
     elif ARGS.subj_ids == ['first']: ARGS.subj_ids = all_possible_ids[:1]
     bad_ids = [x for x in ARGS.subj_ids if x not in all_possible_ids]
     if len(bad_ids) > 0:
-        print(f"You have specified non-existent ids: {bad_ids}"); sys.exit()
+        print(f"You have specified non-existent ids: {bad_ids}\nExistent ids are {all_possible_ids}"); sys.exit()
     return ARGS, need_umap
 
 RELEVANT_ARGS = ['batch_size','dset','enc_lr','dec_lr','frac_gt_labels','mlp_lr','no_umap','noise','num_meta_epochs','num_meta_meta_epochs','num_pseudo_label_epochs','prob_thresh','rlmbda']

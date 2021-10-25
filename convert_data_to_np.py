@@ -188,6 +188,7 @@ if __name__ == "__main__":
         misc.np_save(one_big_X_array,'wisdm_v1','X.npy')
         misc.np_save(one_big_y_array,'wisdm_v1','y.npy')
         misc.np_save(one_big_users_array,'wisdm_v1','users.npy')
+
     elif sys.argv[1] == 'Capture24':
         np_dir = 'datasets/capture24/np_data'
         if not os.path.isdir(np_dir):
@@ -199,11 +200,12 @@ if __name__ == "__main__":
         int_label_converter_dict = dict(enumerate(name_df['label:DohertySpecific2018'].unique()))
         with open('datasets/capture24/int_label_converter_df.json','w') as f:
             json.dump(int_label_converter_dict,f)
-        set_trace()
         name_df = name_df.merge(int_label_converter_df)
         for fname in os.listdir('datasets/capture24'):
+            if fname.endswith('.gz'): continue
             subj_id = fname.split('.')[0]
             if not subj_id.startswith('P') and not len(subj_id) == 4: continue # Skip metadata files
+            print(f"converting {fname} to np")
             try: df = pd.read_csv(os.path.join('datasets/capture24',fname))
             except: set_trace()
             translated_df = df.merge(name_df)
