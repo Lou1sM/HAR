@@ -228,6 +228,8 @@ class HARLearner():
         old_pred_labels = -np.ones(dset.y.shape)
         np_gt_labels = dset.y.detach().cpu().numpy().astype(int)
         super_mask = np.ones(len(dset)).astype(np.bool)
+        mlp_accs = []
+        cluster_accs = []
         for epoch_num in range(num_meta_epochs):
             if ARGS.test:
                 num_tiles = len(dset.y)//self.num_classes
@@ -265,11 +267,14 @@ class HARLearner():
             super_mask*=mask
             mask_to_use = (mask+super_mask)/2
             mlp_acc,mlp_f1,mlp_preds,mlp_confs = self.train_on(pseudo_label_dset,multiplicative_mask=cudify(mask_to_use),num_epochs=num_pseudo_label_epochs)
+            cluster_acc = accuracy(new_pred_labels,np_gt_labels)
+            cluster_accs.append(cluster_acc)
+            mlp_accs.append(mlp_acc)
             y_np = numpyify(dset.y)
             if ARGS.verbose:
                 print('Meta Epoch:', epoch_num)
                 print('Super Masked Counts:',label_counts(y_np[super_mask]))
-                print('Latent accuracy:', accuracy(new_pred_labels,np_gt_labels))
+                print('Latent accuracy:', cluster_acc)
                 print('Masked latent accuracy:', accuracy(new_pred_labels[mask],y_np[mask]),mask.sum())
                 print('Super Masked latent accuracy:', accuracy(new_pred_labels[super_mask],dset.y[super_mask]),super_mask.sum())
                 print('MLP accuracy:', accuracy(mlp_preds,np_gt_labels))
@@ -279,7 +284,7 @@ class HARLearner():
                 print(f"Latent: {accuracy(new_pred_labels,np_gt_labels)}\tMaskL: {accuracy(new_pred_labels[mask],y_np[mask]),mask.sum()}\tSuperMaskL{accuracy(new_pred_labels[super_mask],dset.y[super_mask]),super_mask.sum()}")
             old_pred_labels = deepcopy(new_pred_labels)
         super_super_mask = np.logical_and(super_mask,new_pred_labels==mlp_preds)
-        return new_pred_labels, mask, super_mask, super_super_mask
+        return new_pred_labels, mask, super_mask, super_super_mask, mlp_accs, cluster_accs
 
     def pseudo_label_cluster_meta_meta_loop(self,dset,num_meta_meta_epochs,num_meta_epochs,num_pseudo_label_epochs,prob_thresh,selected_acts):
         y_np = numpyify(dset.y)
@@ -287,7 +292,6 @@ class HARLearner():
         got_by_super_masks = np.zeros(len(dset)).astype(np.bool)
         got_by_super_super_masks = np.zeros(len(dset)).astype(np.bool)
         got_by_masks = np.zeros(len(dset)).astype(np.bool)
-
         preds_histories = []
         super_super_mask_histories = []
         super_mask_histories = []
@@ -296,7 +300,7 @@ class HARLearner():
         for meta_meta_epoch in range(num_meta_meta_epochs):
             print('\nMETA META EPOCH:', meta_meta_epoch)
             meta_pivot_pred_labels = best_preds_so_far if meta_meta_epoch > 0 else 'none'
-            preds, mask, super_mask, super_super_mask = self.pseudo_label_cluster_meta_loop(dset,meta_pivot_pred_labels, num_meta_epochs=num_meta_epochs,num_pseudo_label_epochs=num_pseudo_label_epochs,prob_thresh=prob_thresh,selected_acts=selected_acts)
+            preds, mask, super_mask, super_super_mask, mlp_accs, cluster_accs = self.pseudo_label_cluster_meta_loop(dset,meta_pivot_pred_labels, num_meta_epochs=num_meta_epochs,num_pseudo_label_epochs=num_pseudo_label_epochs,prob_thresh=prob_thresh,selected_acts=selected_acts)
             preds_histories.append(preds)
             super_mask_histories.append(super_mask)
             super_super_mask_histories.append(super_super_mask)
@@ -381,18 +385,56 @@ def main(args):
     prep_start_time = time.time()
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
     if args.dset == 'PAMAP':
+        #x_filters = (50,40,7,4)
+        #y_filters = (5,3,2,1)
+        #x_strides = (2,2,1,1)
+        #y_strides = (1,1,1,1)
+        #max_pools = (2,2,2,2)
+        #x_filters_trans = (45,35,10,6)
+        #y_filters_trans = (8,8,6,6)
+        #x_strides_trans = (1,2,2,2)
+        #y_strides_trans = (1,1,2,1)
         x_filters = (50,40,7,4)
-        y_filters = (5,3,2,1)
+        y_filters = (9,7,5,3)
         x_strides = (2,2,1,1)
         y_strides = (1,1,1,1)
         max_pools = (2,2,2,2)
         x_filters_trans = (45,35,10,6)
-        y_filters_trans = (8,8,6,6)
+        y_filters_trans = (18,18,6,5)
         x_strides_trans = (1,2,2,2)
         y_strides_trans = (1,1,2,1)
         true_num_classes = 12
     elif args.dset == 'UCI':
+        #x_filters = (60,40,4,4)
+        #x_strides = (2,2,1,1)
+        #y_filters = (1,1,3,2)
+        #y_strides = (1,1,3,1)
+        #max_pools = ((2,1),(3,1),(2,1),1)
+        #x_filters_trans = (30,30,20,10)
+        #x_strides_trans = (1,3,2,2)
+        #y_filters_trans = (2,2,2,2)
+        #y_strides_trans = (2,2,1,1)
         x_filters = (60,40,4,4)
+        x_strides = (2,2,1,1)
+        y_filters = (5,4,2,2)
+        y_strides = (1,1,3,1)
+        max_pools = ((2,1),(3,1),(2,1),1)
+        x_filters_trans = (30,30,20,10)
+        x_strides_trans = (1,3,2,2)
+        y_filters_trans = (3,3,3,4)
+        y_strides_trans = (1,2,1,1)
+        true_num_classes = 6
+    elif args.dset == 'WISDM-v1':
+        #x_filters = (50,40,5,4)
+        #y_filters = (1,1,2,2)
+        #x_strides = (2,2,1,1)
+        #y_strides = (1,1,1,1)
+        #max_pools = ((2,1),(3,1),(2,1),1)
+        #x_filters_trans = (30,30,20,10)
+        #y_filters_trans = (2,2,1,1)
+        #x_strides_trans = (1,3,2,2)
+        #y_strides_trans = (1,1,1,1)
+        x_filters = (50,40,5,4)
         x_strides = (2,2,1,1)
         y_filters = (1,1,3,2)
         y_strides = (1,1,3,1)
@@ -401,17 +443,6 @@ def main(args):
         x_strides_trans = (1,3,2,2)
         y_filters_trans = (2,2,2,2)
         y_strides_trans = (2,2,1,1)
-        true_num_classes = 6
-    elif args.dset == 'WISDM-v1':
-        x_filters = (50,40,5,4)
-        y_filters = (1,1,2,2)
-        x_strides = (2,2,1,1)
-        y_strides = (1,1,1,1)
-        max_pools = ((2,1),(3,1),(2,1),1)
-        x_filters_trans = (30,30,20,10)
-        y_filters_trans = (2,2,1,1)
-        x_strides_trans = (1,3,2,2)
-        y_strides_trans = (1,1,1,1)
         true_num_classes = 5
     elif args.dset == 'WISDM-watch':
         x_filters = (50,40,8,6)

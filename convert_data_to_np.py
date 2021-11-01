@@ -1,4 +1,5 @@
 from pdb import set_trace
+from scipy.fft import fft
 from scipy import stats
 from mpmath import mp, mpf
 from dl_utils import misc, label_funcs
@@ -42,22 +43,26 @@ def expand_and_fill_labels(a,propoer_length):
     total_label_array = np.concatenate((start_filler,middle,end_filler)).astype(np.int)
     return total_label_array
 
+def add_dtft(signal):
+    fft_signal_complex = fft(signal,axis=-1)
+    fft_signal_modulusses = np.abs(fft_signal_complex)
+    return np.concatenate((signal,fft_signal_modulusses),axis=-1)
+
 if __name__ == "__main__":
     if sys.argv[1] == 'PAMAP':
-        data_dir = 'PAMAP2_Dataset/Protocol'
-        np_dir = 'PAMAP2_Dataset/np_data'
+        data_dir = 'datasets/PAMAP2_Dataset/Protocol'
+        np_dir = 'datasets/PAMAP2_Dataset/np_data'
         if not os.path.isdir(np_dir):
             os.makedirs(np_dir)
 
         for filename in os.listdir(data_dir):
-            print(filename)
             inpath = os.path.join(data_dir,filename)
             outpath = os.path.join(np_dir,filename.split('.')[0])
             convert(inpath,outpath)
 
     elif sys.argv[1] == 'UCI-raw':
-        data_dir = 'UCI2/RawData'
-        np_dir = 'UCI2/np_data'
+        data_dir = 'datasets/UCI2/RawData'
+        np_dir = 'Udatasets/CI2/np_data'
         if not os.path.isdir(np_dir):
             os.makedirs(np_dir)
 
@@ -186,8 +191,8 @@ if __name__ == "__main__":
         print(one_big_users_array.shape)
         print(f"Number of zero lines: {num_zeros}")
         misc.np_save(one_big_X_array,'wisdm_v1','X.npy')
-        misc.np_save(one_big_y_array,'wisdm_v1','y.npy')
-        misc.np_save(one_big_users_array,'wisdm_v1','users.npy')
+        misc.np_save(one_big_y_array,'datasets/wisdm_v1','y.npy')
+        misc.np_save(one_big_users_array,'datasets/wisdm_v1','users.npy')
 
     elif sys.argv[1] == 'Capture24':
         np_dir = 'datasets/capture24/np_data'
