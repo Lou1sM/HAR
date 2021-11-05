@@ -332,6 +332,7 @@ class HARLearner():
         accs_from_users_list = []
         self_accs = []
         self_f1s = []
+        self_preds = []
         for user_id, (user_dset, sa) in enumerate(user_dsets):
             preds_from_this_user = []
             accs_from_this_user = []
@@ -339,6 +340,7 @@ class HARLearner():
             pseudo_labels = self.pseudo_label_cluster_meta_meta_loop(user_dset,num_meta_meta_epochs=args.num_meta_meta_epochs,num_meta_epochs=args.num_meta_epochs,num_pseudo_label_epochs=args.num_pseudo_label_epochs,prob_thresh=args.prob_thresh,selected_acts=sa)
             self_accs.append(accuracy(pseudo_labels,numpyify(user_dset.y)))
             self_f1s.append(mean_f1(pseudo_labels,numpyify(user_dset.y)))
+            self_preds.append(pseudo_labels)
             for other_user_id, (other_user_dset, sa) in enumerate(user_dsets):
                 acc,f1,preds = self.val_on(other_user_dset)
                 accs_from_this_user.append(acc)
@@ -348,13 +350,15 @@ class HARLearner():
         mega_ultra_preds = np.stack(preds_from_users_list)
         debabled_mega_ultra_preds = debable(mega_ultra_preds,'none')
         start_idxs = [sum([len(d) for d,sa in user_dsets[:i]]) for i in range(len(user_dsets)+1)]
-        debabled_self_preds = [debabled_mega_ultra_preds[uid][start_idxs[uid]:start_idxs[uid+1]] for uid in range(len(user_dsets))]
-        true_accs = [accuracy(p,numpyify(d.y)) for p,(d,sa) in zip(debabled_self_preds,user_dsets)]
-        true_f1s = [mean_f1(p,numpyify(d.y)) for p,(d,sa) in zip(debabled_self_preds,user_dsets)]
+        mlp_self_preds = [debabled_mega_ultra_preds[uid][start_idxs[uid]:start_idxs[uid+1]] for uid in range(len(user_dsets))]
+        true_mlp_accs = [accuracy(p,numpyify(d.y)) for p,(d,sa) in zip(mlp_self_preds,user_dsets)]
+        true_f1s = [mean_f1(p,numpyify(d.y)) for p,(d,sa) in zip(mlp_self_preds,user_dsets)]
+        hmm_self_preds = [translate_labellings(sa,ta) for sa,ta in zip(self_preds,mlp_self_preds)]
+        true_hmm_accs = [accuracy(p,numpyify(d.y)) for p,(d,sa) in zip(hmm_self_preds,user_dsets)]
         total_num_dpoints = sum(len(ud) for ud,sa in user_dsets)
         check_dir(f'experiments/{args.exp_name}')
         with open(f'experiments/{args.exp_name}/results.txt','w') as f:
-            for n,acc_list in zip(('reflexive','legit'),(self_accs,true_accs)):
+            for n,acc_list in zip(('reflexive','mlp','hmm'),(self_accs,true_mlp_accs,true_hmm_accs)):
                 avg_acc = sum([a*len(ud) for a, (ud, sa) in zip(acc_list, user_dsets)])/total_num_dpoints
                 print(f'Acc {n}: {round(avg_acc,5)}')
                 f.write(f'Acc {n}: {round(avg_acc,5)}\n')
@@ -362,8 +366,10 @@ class HARLearner():
                 avg_f1 = sum([a*len(ud) for a, (ud, sa) in zip(f1_list, user_dsets)])/total_num_dpoints
                 print(f'F1 {n}: {round(avg_f1,5)}')
                 f.write(f'F1 {n}: {round(avg_f1,5)}\n')
-            f.write('\nAll accs\n')
-            f.write(' '.join([str(a) for a in true_accs])+'\n')
+            f.write('\nAll mlp_accs\n')
+            f.write(' '.join([str(a) for a in true_mlp_accs])+'\n')
+            f.write('\nAll hmm_accs\n')
+            f.write(' '.join([str(a) for a in true_hmm_accs])+'\n')
             f.write('All f1s\n')
             f.write(' '.join([str(f) for f in true_f1s]))
             for relevant_arg in cl_args.RELEVANT_ARGS:
