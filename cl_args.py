@@ -28,6 +28,7 @@ def get_cl_args():
     parser.add_argument('--prob_thresh',type=float,default=.95)
     parser.add_argument('--rlmbda',type=float,default=.1)
     parser.add_argument('--short_epochs',action='store_true')
+    parser.add_argument('--skip_spectrogram',action='store_true')
     parser.add_argument('--step_size',type=int,default=5)
     parser.add_argument('--test','-t',action='store_true')
     parser.add_argument('--train_type',type=str,choices=training_type_options,default='full')
