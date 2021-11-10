@@ -148,6 +148,7 @@ class HARLearner():
             conf_list = []
             best_f1 = 0
             for batch_idx, (xb,xb1,yb,idx) in enumerate(dl):
+                set_trace()
                 if len(xb) == 1: continue # If last batch is only one element then batchnorm will error
                 latent_time = self.enc(xb)
                 latent_freq = self.enc1(xb1)
@@ -426,15 +427,24 @@ def main(args):
         x_strides_trans = (1,2,2,2)
         y_strides_trans = (1,1,2,1)
 
-        x_filters1 = (20,20,12,7)
-        y_filters1 = (1,1,1,1)
-        x_strides1 = (1,1,1,1)
+        x_filters1 = (50,40,7,4)
+        y_filters1 = (5,3,2,1)
+        x_strides1 = (2,2,1,1)
         y_strides1 = (1,1,1,1)
-        max_pools1 = ((2,1),(2,1),1,1)
-        x_filters_trans1 = (20,20,9,7)
-        y_filters_trans1 = (1,1,1,1)
-        x_strides_trans1 = (2,2,2,1)
-        y_strides_trans1 = (1,1,1,1)
+        max_pools1 = (2,2,2,2)
+        x_filters_trans1 = (45,35,10,6)
+        y_filters_trans1 = (8,8,6,6)
+        x_strides_trans1 = (1,2,2,2)
+        y_strides_trans1 = (1,1,2,1)
+        #x_filters1 = (20,20,12,7)
+        #y_filters1 = (1,1,1,1)
+        #x_strides1 = (1,1,1,1)
+        #y_strides1 = (1,1,1,1)
+        #max_pools1 = ((2,1),(2,1),1,1)
+        #x_filters_trans1 = (20,20,9,7)
+        #y_filters_trans1 = (1,1,1,1)
+        #x_strides_trans1 = (2,2,2,1)
+        #y_strides_trans1 = (1,1,1,1)
         true_num_classes = 12
         num_sensors = 39
     elif args.dset == 'UCI':

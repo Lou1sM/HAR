@@ -1,8 +1,10 @@
 import numpy as np
 import torch
-from scipy import stats, signal
+from scipy import stats
+from scipy.fft import dct
 from torch.utils import data
 from dl_utils import label_funcs
+from dl_utils.tensor_funcs import numpyify
 from pdb import set_trace
 
 class StepDataset(data.Dataset):
@@ -30,7 +32,7 @@ class StepDataset(data.Dataset):
             if window_var < self.split_thresh: total_loss += window_var
         return total_loss
 
-class TimeFrequencyStepDataset(data.Dataset):
+class TimeFrequencyStepDatasetOld(data.Dataset):
     def __init__(self,x_time,x_freq,y,device,window_size,step_size,transforms=[]):
         self.device=device
         self.x_time, self.x_freq, self.y = x_time.to(device),x_freq.to(device),y.to(device)
@@ -44,6 +46,30 @@ class TimeFrequencyStepDataset(data.Dataset):
     def __getitem__(self,idx):
         batch_x_time = self.x_time[idx*self.step_size:(idx*self.step_size) + self.window_size].unsqueeze(0)
         batch_x_freq = self.x_freq[int(idx*self.freq_step_size)].unsqueeze(0)
+        batch_y = self.y[idx]
+        return batch_x_time, batch_x_freq, batch_y, idx
+
+class TimeFrequencyStepDataset(data.Dataset):
+    #def __init__(self,x_time,x_freq,y,device,window_size,step_size,transforms=[]):
+    def __init__(self,x_time,y,device,window_size,step_size):
+        self.device=device
+        self.x_time, self.y = x_time.to(device),y.to(device)
+        self.window_size = window_size
+        self.step_size = step_size
+        #self.transforms = transforms
+        #for transform in transforms:
+            #self.x = transform(self.x)
+        x_freqs = []
+        for idx in range(len(self)):
+            batch_x_time = self.x_time[idx*self.step_size:(idx*self.step_size) + self.window_size].unsqueeze(0)
+            batch_x_freq = dct(numpyify(batch_x_time),axis=2)
+            x_freqs.append(batch_x_freq)
+        self.x_freqs = torch.tensor(x_freqs).cuda()
+        print(self.x_freqs.shape)
+    def __len__(self): return (len(self.x_time)-self.window_size)//self.step_size + 1
+    def __getitem__(self,idx):
+        batch_x_time = self.x_time[idx*self.step_size:(idx*self.step_size) + self.window_size].unsqueeze(0)
+        batch_x_freq = self.x_freqs[idx]
         batch_y = self.y[idx]
         return batch_x_time, batch_x_freq, batch_y, idx
 
@@ -63,11 +89,11 @@ def preproc_xys(x,y,step_size,window_size,action_name_dict):
     selected_acts = [action_name_dict[act_id] for act_id in selected_ids]
     mode_labels, trans_dict, changed = label_funcs.compress_labels(mode_labels)
     assert len(selected_acts) == len(set(mode_labels))
-    _,_,x_freq = signal.spectrogram(x,axis=0)
     x_time = torch.tensor(x,device='cuda').float()
-    x_freq = torch.tensor(np.transpose(x_freq,(2,0,1)),device='cuda').float()
+    #x_freq = torch.tensor(x_freq_np).float()
     y = torch.tensor(mode_labels,device='cuda').float()
-    return x_time, x_freq, y, selected_acts
+    #return x_time, x_freq, y, selected_acts
+    return x_time, y, selected_acts
 
 def make_pamap_dset_train_val(args,subj_ids):
     action_name_dict = {1:'lying',2:'sitting',3:'standing',4:'walking',5:'running',6:'cycling',7:'Nordic walking',9:'watching TV',10:'computer work',11:'car driving',12:'ascending stairs',13:'descending stairs',16:'vacuum cleaning',17:'ironing',18:'folding laundry',19:'house cleaning',20:'playing soccer',24:'rope jumping'}
@@ -75,16 +101,16 @@ def make_pamap_dset_train_val(args,subj_ids):
     train_ids = subj_ids[:num_train_ids]
     x_train = np.concatenate([np.load(f'datasets/PAMAP2_Dataset/np_data/subject{s}.npy') for s in train_ids])
     y_train = np.concatenate([np.load(f'datasets/PAMAP2_Dataset/np_data/subject{s}_labels.npy') for s in train_ids])
-    x_time_train,x_freq_train,y_train,selected_acts = preproc_xys(x_train,y_train,args.step_size,args.window_size,action_name_dict)
-    dset_train = TimeFrequencyStepDataset(x_time_train,x_freq_train,y_train,device='cuda',window_size=args.window_size,step_size=args.step_size)
+    x_time_train,y_train,selected_acts = preproc_xys(x_train,y_train,args.step_size,args.window_size,action_name_dict)
+    dset_train = TimeFrequencyStepDataset(x_time_train,y_train,device='cuda',window_size=args.window_size,step_size=args.step_size)
     if len(subj_ids) <= 2: return dset_train, dset_train, selected_acts
 
     # else make val dset
     val_ids = subj_ids[num_train_ids:]
     x_val = np.concatenate([np.load(f'datasets/PAMAP2_Dataset/np_data/subject{s}.npy') for s in val_ids])
     y_val = np.concatenate([np.load(f'datasets/PAMAP2_Dataset/np_data/subject{s}_labels.npy') for s in val_ids])
-    x_time_val,x_freq_val,y_val,selected_acts = preproc_xys(x_val,y_val,args.step_size,args.window_size,action_name_dict)
-    dset_val = TimeFrequencyStepDataset(x_time_val,x_freq_val,y_val,device='cuda',window_size=args.window_size,step_size=args.step_size)
+    x_time_val,y_val,selected_acts = preproc_xys(x_val,y_val,args.step_size,args.window_size,action_name_dict)
+    dset_val = TimeFrequencyStepDataset(x_time_val,y_val,device='cuda',window_size=args.window_size,step_size=args.step_size)
     return dset_train, dset_val, selected_acts
 
 def make_uci_dset_train_val(args,subj_ids):
