@@ -95,15 +95,16 @@ def preproc_xys(x,y,step_size,window_size,action_name_dict):
     #return x_time, x_freq, y, selected_acts
     return x_time, y, selected_acts
 
-def make_pamap_dset_train_val(args,subj_ids):
+def make_pamap_dset_train_val(args,subj_ids,train_only):
     action_name_dict = {1:'lying',2:'sitting',3:'standing',4:'walking',5:'running',6:'cycling',7:'Nordic walking',9:'watching TV',10:'computer work',11:'car driving',12:'ascending stairs',13:'descending stairs',16:'vacuum cleaning',17:'ironing',18:'folding laundry',19:'house cleaning',20:'playing soccer',24:'rope jumping'}
     num_train_ids = len(subj_ids) - min(2,len(subj_ids)//2)
     train_ids = subj_ids[:num_train_ids]
     x_train = np.concatenate([np.load(f'datasets/PAMAP2_Dataset/np_data/subject{s}.npy') for s in train_ids])
     y_train = np.concatenate([np.load(f'datasets/PAMAP2_Dataset/np_data/subject{s}_labels.npy') for s in train_ids])
     x_time_train,y_train,selected_acts = preproc_xys(x_train,y_train,args.step_size,args.window_size,action_name_dict)
-    dset_train = TimeFrequencyStepDataset(x_time_train,y_train,device='cuda',window_size=args.window_size,step_size=args.step_size)
-    if len(subj_ids) <= 2: return dset_train, dset_train, selected_acts
+    dset_train = StepDataset(x_time_train,y_train,device='cuda',window_size=args.window_size,step_size=args.step_size)
+    if len(subj_ids) <= 2 or train_only: return dset_train, dset_train, selected_acts
+
 
     # else make val dset
     val_ids = subj_ids[num_train_ids:]
@@ -113,7 +114,7 @@ def make_pamap_dset_train_val(args,subj_ids):
     dset_val = TimeFrequencyStepDataset(x_time_val,y_val,device='cuda',window_size=args.window_size,step_size=args.step_size)
     return dset_train, dset_val, selected_acts
 
-def make_uci_dset_train_val(args,subj_ids):
+def make_uci_dset_train_val(args,subj_ids,train_only):
     action_name_dict = {1:'walking',2:'walking upstairs',3:'walking downstairs',4:'sitting',5:'standing',6:'lying',7:'stand_to_sit',9:'sit_to_stand',10:'sit_to_lit',11:'lie_to_sit',12:'stand_to_lie',13:'lie_to_stand'}
     num_train_ids = len(subj_ids) - min(2,len(subj_ids)//2)
     train_ids = subj_ids[:num_train_ids]
@@ -126,7 +127,7 @@ def make_uci_dset_train_val(args,subj_ids):
     #y_val = y_val[y_val!=-1]
     x_train,y_train,selected_acts = preproc_xys(x_train,y_train,args.step_size,args.window_size,action_name_dict)
     dset_train = StepDataset(x_train,y_train,device='cuda',window_size=args.window_size,step_size=args.step_size)
-    if len(subj_ids) <= 2: return dset_train, dset_train, selected_acts
+    if len(subj_ids) <= 2 or train_only: return dset_train, dset_train, selected_acts
 
     # else make val dset
     val_ids = subj_ids[num_train_ids:]
@@ -139,7 +140,7 @@ def make_uci_dset_train_val(args,subj_ids):
     dset_val = StepDataset(x_val,y_val,device='cuda',window_size=args.window_size,step_size=args.step_size)
     return dset_train, dset_val, selected_acts
 
-def make_wisdm_v1_dset_train_val(args,subj_ids):
+def make_wisdm_v1_dset_train_val(args,subj_ids,train_only):
     activities_list = ['Jogging','Walking','Upstairs','Downstairs','Standing','Sitting']
     action_name_dict = dict(zip(range(len(activities_list)),activities_list))
     x = np.load('datasets/wisdm_v1/X.npy')
@@ -155,7 +156,7 @@ def make_wisdm_v1_dset_train_val(args,subj_ids):
     y_train = y[train_idxs_to_user]
     x_train,y_train,selected_acts = preproc_xys(x_train,y_train,args.step_size,args.window_size,action_name_dict)
     dset_train = StepDataset(x_train,y_train,device='cuda',window_size=args.window_size,step_size=args.step_size)
-    if len(subj_ids) <= 2: return dset_train, dset_train, selected_acts
+    if len(subj_ids) <= 2 or train_only: return dset_train, dset_train, selected_acts
 
     # else make val dset
     val_ids = subj_ids[num_train_ids:]
@@ -170,7 +171,7 @@ def make_wisdm_v1_dset_train_val(args,subj_ids):
     dset_val = StepDataset(x_val,y_val,device='cuda',window_size=args.window_size,step_size=args.step_size)
     return dset_train, dset_val, selected_acts
 
-def make_wisdm_watch_dset_train_val(args,subj_ids):
+def make_wisdm_watch_dset_train_val(args,subj_ids,train_only):
     with open('datasets/wisdm-dataset/activity_key.txt') as f: r=f.readlines()
     activities_list = [x.split(' = ')[0] for x in r if ' = ' in x]
     action_name_dict = dict(zip(range(len(activities_list)),activities_list))
@@ -183,7 +184,7 @@ def make_wisdm_watch_dset_train_val(args,subj_ids):
     y_train = y_train[certains_train]
     x_train,y_train,selected_acts = preproc_xys(x_train,y_train,args.step_size,args.window_size,action_name_dict)
     dset_train = StepDataset(x_train,y_train,device='cuda',window_size=args.window_size,step_size=args.step_size)
-    if len(subj_ids) <= 2: return dset_train, dset_train, selected_acts
+    if len(subj_ids) <= 2 or train_only: return dset_train, dset_train, selected_acts
 
     # else make val dset
     val_ids = subj_ids[num_train_ids:]
@@ -196,7 +197,7 @@ def make_wisdm_watch_dset_train_val(args,subj_ids):
     dset_val = StepDataset(x_val,y_val,device='cuda',window_size=args.window_size,step_size=args.step_size)
     return dset_train, dset_val, selected_acts
 
-def make_capture_dset_train_val(args,subj_ids):
+def make_capture_dset_train_val(args,subj_ids,train_only):
     action_name_dict = {0: 'sleep', 1: 'sedentary-screen', 2: 'tasks-moderate', 3: 'sedentary-non-screen', 4: 'walking', 5: 'vehicle', 6: 'bicycling', 7: 'tasks-light', 8: 'sports-continuous', 9: 'sport-interrupted'} # Should also be saved in json file in datasets/capture24
     num_train_ids = len(subj_ids) - min(2,len(subj_ids)//2)
     train_ids = subj_ids[:num_train_ids]
@@ -205,7 +206,7 @@ def make_capture_dset_train_val(args,subj_ids):
     y_train = np.concatenate([np.load(f'datasets/capture24/np_data/P{three_digitify(s)}_labels.npy') for s in train_ids])
     x_train,y_train,selected_acts = preproc_xys(x_train,y_train,args.step_size,args.window_size,action_name_dict)
     dset_train = StepDataset(x_train,y_train,device='cuda',window_size=args.window_size,step_size=args.step_size)
-    if len(subj_ids) <= 2: return dset_train, dset_train, selected_acts
+    if len(subj_ids) <= 2 or train_only: return dset_train, dset_train, selected_acts
 
     # else make val dset
     val_ids = subj_ids[num_train_ids:]
@@ -215,22 +216,22 @@ def make_capture_dset_train_val(args,subj_ids):
     dset_val = StepDataset(x_val,y_val,device='cuda',window_size=args.window_size,step_size=args.step_size)
     return dset_train, dset_val, selected_acts
 
-def make_dset_train_val(args,subj_ids):
+def make_dset_train_val(args,subj_ids,train_only):
     if args.dset == 'PAMAP':
-        return make_pamap_dset_train_val(args,subj_ids)
+        return make_pamap_dset_train_val(args,subj_ids,train_only=train_only)
     if args.dset == 'UCI':
-        return make_uci_dset_train_val(args,subj_ids)
+        return make_uci_dset_train_val(args,subj_ids,train_only=train_only)
     if args.dset == 'WISDM-v1':
-        return make_wisdm_v1_dset_train_val(args,subj_ids)
+        return make_wisdm_v1_dset_train_val(args,subj_ids,train_only=train_only)
     if args.dset == 'WISDM-watch':
-        return make_wisdm_watch_dset_train_val(args,subj_ids)
+        return make_wisdm_watch_dset_train_val(args,subj_ids,train_only=train_only)
     if args.dset == 'Capture24':
-        return make_capture_dset_train_val(args,subj_ids)
+        return make_capture_dset_train_val(args,subj_ids,train_only=train_only)
 
 def make_dsets_by_user(args,subj_ids):
     dsets_by_id = {}
     for subj_id in subj_ids:
-        dset_subj, _, selected_acts_subj = make_dset_train_val(args,[subj_id])
+        dset_subj, _, selected_acts_subj = make_dset_train_val(args,[subj_id],train_only=True)
         dsets_by_id[subj_id] = dset_subj,selected_acts_subj
     return dsets_by_id
 

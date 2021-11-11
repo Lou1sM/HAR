@@ -100,13 +100,11 @@ class Var_BS_MLP(nn.Module):
         return x
 
 class HARLearner():
-    def __init__(self,enc,enc1,mlp,dec,dec1,batch_size,num_classes):
+    def __init__(self,enc,mlp,dec,batch_size,num_classes):
         self.batch_size = batch_size
         self.num_classes = num_classes
         self.enc = enc
         self.dec = dec
-        self.enc1 = enc1
-        self.dec1 = dec1
         self.mlp = mlp
         self.pseudo_label_lf = avoid_minus_ones_lf_wrapper(nn.CrossEntropyLoss(reduction='none'))
         self.rec_lf = nn.MSELoss(reduction='none')
@@ -119,12 +117,8 @@ class HARLearner():
         self.enc.eval()
         collected_latents = []
         determin_dl = data.DataLoader(dset,batch_sampler=data.BatchSampler(data.SequentialSampler(dset),self.batch_size,drop_last=False),pin_memory=False)
-        for idx, (xb,xb1,yb,tb) in enumerate(determin_dl):
+        for idx, (xb,yb,tb) in enumerate(determin_dl):
             batch_latent = self.enc(xb)
-            latent_time = self.enc(xb)
-            latent_freq = self.enc1(xb1)
-            if ARGS.skip_spectrogram: latent_freq=torch.zeros_like(latent_freq)
-            batch_latent = torch.cat((latent_time,latent_freq.view((latent_freq.shape[0],-1,1,1))),axis=1)
             batch_latent = batch_latent.view(batch_latent.shape[0],-1).detach().cpu().numpy()
             collected_latents.append(batch_latent)
         collected_latents = np.concatenate(collected_latents,axis=0)
@@ -147,13 +141,9 @@ class HARLearner():
             idx_list = []
             conf_list = []
             best_f1 = 0
-            for batch_idx, (xb,xb1,yb,idx) in enumerate(dl):
-                set_trace()
+            for batch_idx, (xb,yb,idx) in enumerate(dl):
                 if len(xb) == 1: continue # If last batch is only one element then batchnorm will error
-                latent_time = self.enc(xb)
-                latent_freq = self.enc1(xb1)
-                if ARGS. skip_spectrogram: latent_freq=torch.zeros_like(latent_freq)
-                latent = torch.cat((latent_time,latent_freq.view((latent_freq.shape[0],-1,1,1))),axis=1)
+                latent = self.enc(xb)
                 if noise > 0: latent = noiseify(latent,noise)
                 label_pred = self.mlp(latent) if latent.ndim == 2 else self.mlp(latent[:,:,0,0])
                 batch_mask = 'none' if not is_mask  else multiplicative_mask[:self.batch_size] if ARGS.test else multiplicative_mask[idx]
@@ -208,11 +198,8 @@ class HARLearner():
         pred_list = []
         idx_list = []
         dl = data.DataLoader(dset,batch_sampler=data.BatchSampler(data.RandomSampler(dset),self.batch_size,drop_last=False),pin_memory=False)
-        for batch_idx, (xb,xb1,yb,idx) in enumerate(dl):
-            latent_time = self.enc(xb)
-            latent_freq = self.enc1(xb1)
-            if ARGS. skip_spectrogram: latent_freq=torch.zeros_like(latent_freq)
-            latent = torch.cat((latent_time,latent_freq.view((latent_freq.shape[0],-1,1,1))),axis=1)
+        for batch_idx, (xb,yb,idx) in enumerate(dl):
+            latent = self.enc(xb)
             label_pred = self.mlp(latent) if latent.ndim == 2 else self.mlp(latent[:,:,0,0])
             pred_list.append(label_pred.argmax(axis=1).detach().cpu().numpy())
             idx_list.append(idx.detach().cpu().numpy())
@@ -493,32 +480,25 @@ def main(args):
         true_num_classes = 10
     num_classes = args.num_classes if args.num_classes != -1 else true_num_classes
     enc = EncByLayer(x_filters,y_filters,x_strides,y_strides,max_pools,show_shapes=args.show_shapes)
-    enc1 = EncByLayer(x_filters1,y_filters1,x_strides1,y_strides1,max_pools1,show_shapes=args.show_shapes)
     dec = DecByLayer(x_filters_trans,y_filters_trans,x_strides_trans,y_strides_trans,show_shapes=args.show_shapes)
-    dec1 = DecByLayer(x_filters_trans1,y_filters_trans1,x_strides_trans1,y_strides_trans1,show_shapes=args.show_shapes)
-    mlp = Var_BS_MLP(32*(num_sensors+1),25,num_classes)
+    mlp = Var_BS_MLP(32,25,num_classes)
     if args.load_pretrained:
         enc.load_state_dict(torch.load('enc_pretrained.pt'))
         mlp.load_state_dict(torch.load('dec_pretrained.pt'))
     enc.cuda()
     dec.cuda()
-    enc1.cuda()
-    dec1.cuda()
     mlp.cuda()
     subj_ids = args.subj_ids
-    dset_train, dset_val, selected_acts = make_dset_train_val(args,subj_ids)
+    dset_train, dset_val, selected_acts = make_dset_train_val(args,subj_ids,train_only=False)
     if args.show_shapes:
         dl = data.DataLoader(dset_train,batch_sampler=data.BatchSampler(data.RandomSampler(dset_train),args.batch_size,drop_last=False),pin_memory=False)
         x_time_trial_run, x_freq_trial_run, _, _ = next(iter(dl))
         #lat = enc(torch.ones((2,1,512,num_ftrs_time),device='cuda'))
         lat = enc(x_time_trial_run)
         dec(lat)
-        num_ftrs_freq = dset_train.x_freq.shape[-2]
-        lat = enc1(x_freq_trial_run)
-        dec1(lat)
         sys.exit()
 
-    har = HARLearner(enc=enc,enc1=enc1,mlp=mlp,dec=dec,dec1=dec1,batch_size=args.batch_size,num_classes=num_classes)
+    har = HARLearner(enc=enc,mlp=mlp,dec=dec,batch_size=args.batch_size,num_classes=num_classes)
 
     train_start_time = time.time()
     dsets_by_id = make_dsets_by_user(args,subj_ids)
