@@ -108,10 +108,12 @@ class HARLearner():
         self.mlp = mlp
         self.pseudo_label_lf = avoid_minus_ones_lf_wrapper(nn.CrossEntropyLoss(reduction='none'))
         self.rec_lf = nn.MSELoss(reduction='none')
+        self.temp_prox_lf = nn.MSELoss()
 
         self.enc_opt = torch.optim.Adam(self.enc.parameters(),lr=ARGS.enc_lr)
         self.dec_opt = torch.optim.Adam(self.dec.parameters(),lr=ARGS.dec_lr)
         self.mlp_opt = torch.optim.Adam(self.mlp.parameters(),lr=ARGS.mlp_lr)
+
 
     def get_latents(self,dset):
         self.enc.eval()
@@ -136,6 +138,10 @@ class HARLearner():
         sampler = data.RandomSampler(dset) if custom_sampler is 'none' else custom_sampler
         dl = data.DataLoader(dset,batch_sampler=data.BatchSampler(sampler,self.batch_size,drop_last=False),pin_memory=False)
         is_mask = multiplicative_mask is not 'none'
+        idx_diffs = torch.arange(len(dset))[:,None] - torch.arange(len(dset))
+        temp_prox_sampler = ProximalSampler(dset)
+        temp_prox_dl = data.DataLoader(dset,batch_sampler=data.BatchSampler(sampler,self.batch_size,drop_last=False),pin_memory=False)
+        temp_prox_targets_table = torch.exp(-0.1 * torch.arange(len(dset))).cuda()
         for epoch in range(num_epochs):
             pred_list = []
             idx_list = []
@@ -161,6 +167,15 @@ class HARLearner():
                 conf_list.append(numpyify(conf))
                 idx_list.append(idx.detach().cpu().numpy())
                 if ARGS.test: break
+
+            for batch_idx, (xb,yb,idx) in enumerate(temp_prox_dl):
+                latent = self.enc(xb)
+                temp_prox_preds = latent[:,:,0,0]@latent[:,:,0,0].transpose(0,1)
+                temp_prox_targets = temp_prox_targets_table[idx - idx[:,None]]
+                temp_prox_loss = self.temp_prox_lf(temp_prox_preds,temp_prox_targets)
+                temp_prox_loss.backward()
+                self.enc_opt.step(); self.enc_opt.zero_grad()
+                self.mlp_opt.step(); self.mlp_opt.zero_grad()
             if ARGS.test:
                 return -1, -1, dummy_labels(self.num_classes,len(dset.y)), np.ones(len(dset))
             pred_array = np.concatenate(pred_list)
@@ -387,6 +402,20 @@ class HARLearner():
             f.write(' '.join([str(f) for f in true_f1s]))
             for relevant_arg in cl_args.RELEVANT_ARGS:
                 f.write(f"\n{relevant_arg}: {vars(ARGS).get(relevant_arg)}")
+
+class ProximalSampler(data.Sampler):
+    def __init__(self, data_source, permute_prob = 0.5) -> None:
+        self.data_source = data_source
+
+    def __iter__(self):
+        n = len(self.data_source)
+        idxs = torch.arange(n)
+        to_permute = torch.FloatTensor(n).uniform_() > self.permute_prob
+        idxs[to_permute] = idxs[to_permute][torch.randperm(to_permute.sum())]
+        yield from idxs
+
+    def __len__(self) -> int:
+        return len(self.data_source)
 
 def stratified_sample_mask(population_length, sample_frac):
     if sample_frac == 0:
