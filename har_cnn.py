@@ -100,12 +100,14 @@ class Var_BS_MLP(nn.Module):
         return x
 
 class HARLearner():
-    def __init__(self,enc,mlp,dec,batch_size,num_classes):
+    def __init__(self,enc,dec,mlp,temp_prox_mlp,batch_size,temp_prox_batch_size,num_classes):
         self.batch_size = batch_size
+        self.temp_prox_batch_size = temp_prox_batch_size
         self.num_classes = num_classes
         self.enc = enc
         self.dec = dec
         self.mlp = mlp
+        self.temp_prox_mlp = temp_prox_mlp
         self.pseudo_label_lf = avoid_minus_ones_lf_wrapper(nn.CrossEntropyLoss(reduction='none'))
         self.rec_lf = nn.MSELoss(reduction='none')
         self.temp_prox_lf = nn.MSELoss()
@@ -139,8 +141,8 @@ class HARLearner():
         is_mask = multiplicative_mask is not 'none'
         idx_diffs = torch.arange(len(dset))[:,None] - torch.arange(len(dset))
         temp_prox_sampler = ProximalSampler(dset, permute_prob=ARGS.permute_prob)
-        temp_prox_dl = data.DataLoader(dset,batch_sampler=data.BatchSampler(sampler,self.batch_size,drop_last=False),pin_memory=False)
-        temp_prox_targets_table = torch.exp(-0.1 * torch.arange(len(dset))).cuda()
+        temp_prox_dl = data.DataLoader(dset,batch_sampler=data.BatchSampler(temp_prox_sampler,self.temp_prox_batch_size,drop_last=False),pin_memory=False)
+        temp_prox_targets_table = torch.log(torch.arange(1,len(dset)+1)).cuda()
         for epoch in range(num_epochs):
             pred_list = []
             idx_list = []
@@ -150,17 +152,18 @@ class HARLearner():
                 if len(xb) == 1: continue # If last batch is only one element then batchnorm will error
                 latent = self.enc(xb)
                 if noise > 0: latent = noiseify(latent,noise)
-                label_pred = self.mlp(latent) if latent.ndim == 2 else self.mlp(latent[:,:,0,0])
-                batch_mask = 'none' if not is_mask  else multiplicative_mask[:self.batch_size] if ARGS.test else multiplicative_mask[idx]
-                loss = lf(label_pred,yb.long(),batch_mask)
-                if math.isnan(loss): set_trace()
-                if rlmbda>0:
-                    rec_loss = self.rec_lf(self.dec(latent),xb).mean()
-                    loss += rlmbda*rec_loss
+                #label_pred = self.mlp(latent) if latent.ndim == 2 else self.mlp(latent[:,:,0,0])
+                label_pred = self.mlp(latent[:,:,0,0])
+                #batch_mask = 'none' if not is_mask  else multiplicative_mask[:self.batch_size] if ARGS.test else multiplicative_mask[idx]
+                #loss = lf(label_pred,yb.long(),batch_mask)
+                #if math.isnan(loss): set_trace()
+                #if rlmbda>0:
+                #    rec_loss = self.rec_lf(self.dec(latent),xb).mean()
+                #    loss += rlmbda*rec_loss
                 #loss.backward()
                 #self.enc_opt.step(); self.enc_opt.zero_grad()
                 #self.mlp_opt.step(); self.mlp_opt.zero_grad()
-                if rlmbda>0: self.dec_opt.step(); self.dec_opt.zero_grad()
+                #if rlmbda>0: self.dec_opt.step(); self.dec_opt.zero_grad()
                 conf,pred = label_pred.max(axis=1)
                 pred_list.append(numpyify(pred))
                 conf_list.append(numpyify(conf))
@@ -168,12 +171,16 @@ class HARLearner():
                 if ARGS.test: break
 
             for batch_idx, (xb,yb,idx) in enumerate(temp_prox_dl):
-                latent = self.enc(xb)
-                temp_prox_preds = latent[:,:,0,0]@latent[:,:,0,0].transpose(0,1)
-                temp_prox_targets = temp_prox_targets_table[idx - idx[:,None]]
-                temp_prox_loss = self.temp_prox_lf(temp_prox_preds,temp_prox_targets)
+                latent = self.enc(xb)[:,:,0,0]
+                bs = latent.shape[0]
+                set_trace()
+                latent_dists = torch.norm(latent[:,None] - latent,dim=2)
+                temp_prox_targets = temp_prox_targets_table[(idx - idx[:,None]).abs()]
+                temp_prox_loss = self.temp_prox_lf(latent_dists,temp_prox_targets)
                 temp_prox_loss.backward()
                 self.enc_opt.step(); self.enc_opt.zero_grad()
+                if ARGS.short_epochs and batch_idx == 200: break
+                if ARGS.test: break
             if ARGS.test:
                 return -1, -1, dummy_labels(self.num_classes,len(dset.y)), np.ones(len(dset))
             pred_array = np.concatenate(pred_list)
@@ -402,13 +409,14 @@ class HARLearner():
                 f.write(f"\n{relevant_arg}: {vars(ARGS).get(relevant_arg)}")
 
 class ProximalSampler(data.Sampler):
-    def __init__(self, data_source, permute_prob = 0.5) -> None:
+    def __init__(self, data_source, permute_prob) -> None:
         self.data_source = data_source
+        self.permute_prob = permute_prob
 
     def __iter__(self):
         n = len(self.data_source)
         idxs = torch.arange(n)
-        to_permute = torch.FloatTensor(n).uniform_() > self.permute_prob
+        to_permute = torch.FloatTensor(n).uniform_() < self.permute_prob
         idxs[to_permute] = idxs[to_permute][torch.randperm(to_permute.sum())]
         yield from idxs
 
@@ -509,12 +517,14 @@ def main(args):
     enc = EncByLayer(x_filters,y_filters,x_strides,y_strides,max_pools,show_shapes=args.show_shapes)
     dec = DecByLayer(x_filters_trans,y_filters_trans,x_strides_trans,y_strides_trans,show_shapes=args.show_shapes)
     mlp = Var_BS_MLP(32,25,num_classes)
+    temp_prox_mlp = Var_BS_MLP(2*32,50,1)
     if args.load_pretrained:
         enc.load_state_dict(torch.load('enc_pretrained.pt'))
         mlp.load_state_dict(torch.load('dec_pretrained.pt'))
     enc.cuda()
     dec.cuda()
     mlp.cuda()
+    temp_prox_mlp.cuda()
     subj_ids = args.subj_ids
     dset_train, dset_val, selected_acts = make_dset_train_val(args,subj_ids,train_only=False)
     if args.show_shapes:
@@ -525,7 +535,7 @@ def main(args):
         dec(lat)
         sys.exit()
 
-    har = HARLearner(enc=enc,mlp=mlp,dec=dec,batch_size=args.batch_size,num_classes=num_classes)
+    har = HARLearner(enc=enc,mlp=mlp,dec=dec,temp_prox_mlp=temp_prox_mlp,batch_size=args.batch_size,temp_prox_batch_size=args.temp_prox_batch_size,num_classes=num_classes)
 
     train_start_time = time.time()
     dsets_by_id = make_dsets_by_user(args,subj_ids)
