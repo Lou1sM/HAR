@@ -20,6 +20,7 @@ def get_cl_args():
     parser.add_argument('--gpu',type=str,default='0')
     parser.add_argument('--load_pretrained',action='store_true')
     parser.add_argument('--mlp_lr',type=float,default=1e-3)
+    parser.add_argument('--nf1',type=int,default=1)
     parser.add_argument('--no_umap',action='store_true')
     parser.add_argument('--noise',type=float,default=1.)
     parser.add_argument('--num_classes',type=int,default=-1)
@@ -41,13 +42,11 @@ def get_cl_args():
     parser.add_argument('--window_size',type=int,default=512)
     ARGS = parser.parse_args()
 
-    need_umap = False
     if ARGS.test:
         ARGS.num_meta_epochs = 1
         ARGS.num_meta_meta_epochs = 1
         ARGS.num_cluster_epochs = 1
         ARGS.num_pseudo_label_epochs = 1
-    elif not ARGS.no_umap and not ARGS.show_shapes: need_umap = True
     if ARGS.short_epochs:
         ARGS.num_meta_epochs = 1
         ARGS.num_cluster_epochs = 1
@@ -70,6 +69,6 @@ def get_cl_args():
     bad_ids = [x for x in ARGS.subj_ids if x not in all_possible_ids]
     if len(bad_ids) > 0:
         print(f"You have specified non-existent ids: {bad_ids}\nExistent ids are {all_possible_ids}"); sys.exit()
-    return ARGS, need_umap
+    return ARGS
 
 RELEVANT_ARGS = ['batch_size','dset','enc_lr','dec_lr','frac_gt_labels','mlp_lr','no_umap','noise','num_meta_epochs','num_meta_meta_epochs','num_pseudo_label_epochs','prob_thresh','rlmbda']
