@@ -127,7 +127,7 @@ class HARLearner():
         collected_latents = np.concatenate(collected_latents,axis=0)
         return collected_latents
 
-    def train_on(self,dset,befores,before_latents,num_epochs,multiplicative_mask='none',lf=None,compute_acc=True,reinit=False,rlmbda=0,custom_sampler='none',noise=0.):
+    def train_on(self,dset,num_epochs,multiplicative_mask='none',lf=None,compute_acc=True,reinit=False,rlmbda=0,custom_sampler='none',noise=0.):
         if reinit: self.reinit_nets()
         self.enc.train()
         #self.dec.train()
@@ -143,10 +143,6 @@ class HARLearner():
         temp_prox_sampler = ProximalSampler(dset, permute_prob=ARGS.permute_prob)
         temp_prox_dl = data.DataLoader(dset,batch_sampler=data.BatchSampler(temp_prox_sampler,self.temp_prox_batch_size,drop_last=False),pin_memory=False)
         temp_prox_targets_table = torch.log(torch.arange(1,len(dset)+1).float()).cuda()
-        afters = [x.detach().cpu().numpy() for x in self.enc.parameters()]
-        after_latents = self.get_latents(dset)
-        print('UnChanged:', all([(a==b).all() for a,b in zip(befores,afters)]))
-        print('UnChanged latents:', (before_latents==after_latents).all())
         for epoch in range(num_epochs):
             pred_list = []
             idx_list = []
@@ -210,10 +206,6 @@ class HARLearner():
                     best_conf_array_ordered = conf_array_ordered
                     best_acc = acc
                     best_f1 = f1
-        afters = [x.detach().cpu().numpy() for x in self.enc.parameters()]
-        after_latents = self.get_latents(dset)
-        print('UnChanged:', all([(a==b).all() for a,b in zip(befores,afters)]))
-        print('UnChanged latents:', (before_latents==after_latents).all())
         return best_acc,best_f1,best_pred_array_ordered,best_conf_array_ordered
 
     def val_on(self,dset):
@@ -269,87 +261,32 @@ class HARLearner():
         old_latents = -np.ones((len(dset),32))
         old_pred_labels = -np.ones(dset.y.shape)
         np_gt_labels = dset.y.detach().cpu().numpy().astype(int)
-        super_mask = np.ones(len(dset)).astype(np.bool)
-        mlp_accs = []
-        cluster_accs = []
         orig_x = numpyify(dset.x)
         orig_y = numpyify(dset.y)
         for epoch_num in range(num_meta_epochs):
             if ARGS.test:
                 num_tiles = len(dset.y)//self.num_classes
-                new_pred_labels = np.tile(np.arange(self.num_classes),num_tiles).astype(np.long)
+                gmm_labels = np.tile(np.arange(self.num_classes),num_tiles).astype(np.long)
                 additional = len(dset.y) - (num_tiles*self.num_classes)
                 if additional > 0:
-                    new_pred_labels = np.concatenate((new_pred_labels,np.ones(additional)))
-                new_pred_labels = new_pred_labels.astype(np.long)
+                    gmm_labels = np.concatenate((gmm_labels,np.ones(additional)))
+                gmm_labels = gmm_labels.astype(np.long)
                 mask = np.ones(len(dset.y)).astype(np.bool)
-                old_pred_labels = new_pred_labels
+                old_gmm_labels = gmm_labels
             else:
                 latents = self.get_latents(dset)
-                umapped_latents = latents if ARGS.no_umap else umap.UMAP(min_dist=0,n_neighbors=60,n_components=2,random_state=42).fit_transform(latents.squeeze())
-                model = hmm.GaussianHMM(self.num_classes,'full')
-                model.params = 'mc'
-                model.init_params = 'mc'
-                model.startprob_ = np.ones(self.num_classes)/self.num_classes
-                num_action_blocks = len([item for idx,item in enumerate(dset.y) if dset.y[idx-1] != item])
-                prob_new_action = num_action_blocks/len(dset)
-                model.transmat_ = (np.eye(self.num_classes) * (1-prob_new_action)) + (np.ones((self.num_classes,self.num_classes))*prob_new_action/self.num_classes)
-                model.fit(umapped_latents)
-                new_pred_labels = model.predict(umapped_latents)
-                new_pred_probs = model.predict_proba(umapped_latents)
-
-                c = GaussianMixture(n_components=self.num_classes)
-                gmm_labels = c.fit_predict(umapped_latents)
-                mask = new_pred_probs.max(axis=1) == 1
-                if meta_pivot_pred_labels is not 'none':
-                    new_pred_labels = translate_labellings(new_pred_labels,meta_pivot_pred_labels,subsample_size=30000)
-                elif epoch_num > 0:
-                    new_pred_labels = translate_labellings(new_pred_labels,old_pred_labels,subsample_size=30000)
+                assert not epoch_num==0 or ARGS.skip_train or (latents==old_latents).all()
+                c = GaussianMixture(n_components=self.num_classes,n_init=5)
+                gmm_labels = c.fit_predict(latents)
             pseudo_label_dset = deepcopy(dset)
-            pseudo_label_dset.y = cudify(new_pred_labels)
-            if epoch_num > 0:
-                mask2 = new_pred_labels==old_pred_labels
-                mask = mask*mask2
-                assert (new_pred_labels[mask]==old_pred_labels[mask]).all()
-            super_mask*=mask
-            mask_to_use = (mask+super_mask)/2
-            before_latents = self.get_latents(dset)
-            print("Same x:", (numpyify(dset.x) == orig_x).all())
-            print("Same y:", (numpyify(dset.y) == orig_y).all())
-            print(next(self.enc.parameters()).flatten()[0])
-            before_latents = self.get_latents(dset)
-            befores = [x.detach().cpu().numpy() for x in self.enc.parameters()]
-            mlp_acc,mlp_f1,mlp_preds,mlp_confs = self.train_on(pseudo_label_dset,befores,before_latents,multiplicative_mask=cudify(mask_to_use),num_epochs=num_pseudo_label_epochs)
+            pseudo_label_dset.y = cudify(gmm_labels)
+            mlp_acc,mlp_f1,mlp_preds,mlp_confs = self.train_on(pseudo_label_dset,num_epochs=num_pseudo_label_epochs)
             afters = [x.detach().cpu().numpy() for x in self.enc.parameters()]
-            after_latents = self.get_latents(dset)
-            print('UnChanged:', all([(a==b).all() for a,b in zip(befores,afters)]))
-            print('UnChanged latents:', (before_latents==after_latents).all())
-            print(next(self.enc.parameters()).flatten()[0])
-            print("Same x:", (numpyify(dset.x) == orig_x).all())
-            print("Same y:", (numpyify(dset.y) == orig_y).all())
-            cluster_acc = accuracy(new_pred_labels,np_gt_labels)
             gmm_acc = accuracy(gmm_labels,np_gt_labels)
-            cluster_accs.append(cluster_acc)
-            mlp_accs.append(mlp_acc)
-            set_trace()
-            y_np = numpyify(dset.y)
-            print('HMM accuracy:', cluster_acc)
-            print('GausianHMM accuracy:', gmm_acc)
-            if ARGS.verbose:
-                print('Meta Epoch:', epoch_num)
-                print('Super Masked Counts:',label_counts(y_np[super_mask]))
-                print('Latent accuracy:', cluster_acc)
-                print('Masked latent accuracy:', accuracy(new_pred_labels[mask],y_np[mask]),mask.sum())
-                print('Super Masked latent accuracy:', accuracy(new_pred_labels[super_mask],dset.y[super_mask]),super_mask.sum())
-                print('MLP accuracy:', accuracy(mlp_preds,np_gt_labels))
-                print('Masked MLP accuracy:', accuracy(mlp_preds[mask],dset.y[mask]),mask.sum())
-                print('Super Masked MLP accuracy:', accuracy(mlp_preds[super_mask],dset.y[super_mask]),super_mask.sum())
-            elif epoch_num == num_meta_epochs-1:
-                print(f"Latent: {accuracy(new_pred_labels,np_gt_labels)}\tMaskL: {accuracy(new_pred_labels[mask],y_np[mask]),mask.sum()}\tSuperMaskL{accuracy(new_pred_labels[super_mask],dset.y[super_mask]),super_mask.sum()}")
-            old_pred_labels = deepcopy(new_pred_labels)
+            print('GMM accuracy:', gmm_acc)
+            old_gmm_labels = deepcopy(gmm_labels)
             old_latents = deepcopy(latents)
-        super_super_mask = np.logical_and(super_mask,new_pred_labels==mlp_preds)
-        return new_pred_labels, mask, super_mask, super_super_mask, mlp_accs, cluster_accs
+        return gmm_labels
 
     def pseudo_label_cluster_meta_meta_loop(self,dset,num_meta_meta_epochs,num_meta_epochs,num_pseudo_label_epochs,prob_thresh,selected_acts):
         y_np = numpyify(dset.y)
