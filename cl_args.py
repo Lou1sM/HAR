@@ -26,11 +26,14 @@ def get_cl_args():
     parser.add_argument('--num_classes',type=int,default=-1)
     parser.add_argument('--num_meta_epochs',type=int,default=4)
     parser.add_argument('--num_meta_meta_epochs',type=int,default=4)
-    parser.add_argument('--num_pseudo_label_epochs',type=int,default=3)
+    parser.add_argument('--num_pl_epochs',type=int,default=3)
     parser.add_argument('--permute_prob',type=float,default=.5)
+    parser.add_argument('--plot',action='store_true')
     parser.add_argument('--prob_thresh',type=float,default=.95)
     parser.add_argument('--rlmbda',type=float,default=.1)
     parser.add_argument('--short_epochs',action='store_true')
+    parser.add_argument('--skip_pl_train',action='store_true')
+    parser.add_argument('--skip_temp_train',action='store_true')
     parser.add_argument('--skip_train',action='store_true')
     parser.add_argument('--step_size',type=int,default=5)
     parser.add_argument('--temp_prox_batch_size',type=int,default=8)
@@ -42,15 +45,18 @@ def get_cl_args():
     parser.add_argument('--window_size',type=int,default=512)
     ARGS = parser.parse_args()
 
+    if ARGS.skip_train:
+        ARGS.skip_pl_train = True
+        ARGS.skip_temp_train = True
     if ARGS.test:
         ARGS.num_meta_epochs = 1
         ARGS.num_meta_meta_epochs = 1
         ARGS.num_cluster_epochs = 1
-        ARGS.num_pseudo_label_epochs = 1
+        ARGS.num_pl_epochs = 1
     if ARGS.short_epochs:
         ARGS.num_meta_epochs = 1
         ARGS.num_cluster_epochs = 1
-        ARGS.num_pseudo_label_epochs = 1
+        ARGS.num_pl_epochs = 1
     if ARGS.dset == 'PAMAP':
         all_possible_ids = [str(x) for x in range(101,110)]
     elif ARGS.dset == 'UCI':
@@ -71,4 +77,4 @@ def get_cl_args():
         print(f"You have specified non-existent ids: {bad_ids}\nExistent ids are {all_possible_ids}"); sys.exit()
     return ARGS
 
-RELEVANT_ARGS = ['batch_size','dset','enc_lr','dec_lr','frac_gt_labels','mlp_lr','no_umap','noise','num_meta_epochs','num_meta_meta_epochs','num_pseudo_label_epochs','prob_thresh','rlmbda']
+RELEVANT_ARGS = ['batch_size','dset','enc_lr','dec_lr','frac_gt_labels','mlp_lr','no_umap','noise','num_meta_epochs','num_meta_meta_epochs','num_pl_epochs','prob_thresh','rlmbda']

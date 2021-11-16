@@ -1,6 +1,7 @@
 import sys
 from sklearn.mixture import GaussianMixture
 import matplotlib.pyplot as plt
+import matplotlib.cm as cm
 from hmmlearn import hmm
 from copy import deepcopy
 import os
@@ -37,6 +38,7 @@ class EncByLayer(nn.Module):
         self.show_shapes = show_shapes
         num_layers = len(x_filters)
         assert all(len(x)==num_layers for x in (y_filters,x_strides,y_strides,max_pools))
+        #ncvs = [1]+[nf1*2**i for i in range(num_layers)]
         ncvs = [1]+[nf1*2**i for i in range(num_layers)]
         conv_layers = []
         for i in range(num_layers):
@@ -118,18 +120,20 @@ class ProximalSampler(data.Sampler):
 
 class HARLearner():
     #def __init__(self,enc,dec,mlp,temp_prox_mlp,batch_size,temp_prox_batch_size,num_classes):
-    def __init__(self,enc,mlp,batch_size,temp_prox_batch_size,num_classes):
+    def __init__(self,enc,mlp,temp_mlp,batch_size,temp_prox_batch_size,num_classes):
         self.batch_size = batch_size
         self.temp_prox_batch_size = temp_prox_batch_size
         self.num_classes = num_classes
         self.enc = enc
         self.mlp = mlp
+        self.temp_mlp = temp_mlp
         self.rec_lf = nn.MSELoss(reduction='none')
         self.pseudo_label_lf = avoid_minus_ones_lf_wrapper(nn.CrossEntropyLoss(reduction='none'))
         self.temp_prox_lf = nn.MSELoss()
 
         self.enc_opt = torch.optim.Adam(self.enc.parameters(),lr=ARGS.enc_lr)
         self.mlp_opt = torch.optim.Adam(self.mlp.parameters(),lr=ARGS.mlp_lr)
+        self.temp_mlp_opt = torch.optim.Adam(self.temp_mlp.parameters(),lr=ARGS.mlp_lr)
 
     def get_latents(self,dset):
         self.enc.eval()
@@ -142,7 +146,7 @@ class HARLearner():
         collected_latents = np.concatenate(collected_latents,axis=0)
         return collected_latents
 
-    def train_on(self,dset,num_epochs,multiplicative_mask='none',lf=None,compute_acc=True,reinit=False,rlmbda=0,custom_sampler='none',noise=0.):
+    def train_on(self,dset,num_epochs,multiplicative_mask='none',lf=None,compute_acc=False,reinit=False,rlmbda=0,custom_sampler='none',noise=0.):
         if reinit: self.reinit_nets()
         self.enc.train()
         #self.dec.train()
@@ -155,29 +159,31 @@ class HARLearner():
         is_mask = multiplicative_mask is not 'none'
         temp_prox_sampler = ProximalSampler(dset, permute_prob=ARGS.permute_prob)
         temp_prox_dl = data.DataLoader(dset,batch_sampler=data.BatchSampler(temp_prox_sampler,self.temp_prox_batch_size,drop_last=False),pin_memory=False)
-        temp_prox_targets_table = torch.log(torch.arange(1,len(dset)+1).float()).cuda()
+        temp_prox_targets_table = torch.log(torch.arange(1,len(dset)+1)).float()
+        ls = []
+        ds = []
         for epoch in range(num_epochs):
             pred_list = []
             idx_list = []
             conf_list = []
             best_f1 = 0
-            ls = []
-            ds = []
-            print('temp prox training')
             for batch_idx, (xb,yb,idx) in enumerate(temp_prox_dl):
-                if ARGS.skip_train: break
+                if ARGS.skip_temp_train: break
                 latent = self.enc(xb)[:,:,0,0]
-                latent_dists = torch.norm(latent[:,None] - latent,dim=2)
-                ds.append(latent_dists.mean().item())
-                temp_prox_targets = temp_prox_targets_table[(idx - idx[:,None]).abs()]
-                temp_prox_loss = self.temp_prox_lf(latent_dists,temp_prox_targets)
+                #latent_dists = torch.norm(latent[:,None] - latent,dim=2)
+                #ds.append(latent_dists.mean().item())
+                #temp_prox_targets = temp_prox_targets_table[(idx - idx[:,None]).abs()]
+                temp_pred = self.temp_mlp(latent)
+                temp_target = idx*10/len(dset)
+                temp_prox_loss = self.temp_prox_lf(temp_pred,temp_target)
                 ls.append(temp_prox_loss.item())
                 temp_prox_loss.backward()
                 self.enc_opt.step(); self.enc_opt.zero_grad()
+                self.temp_mlp_opt.step(); self.temp_mlp_opt.zero_grad()
                 if ARGS.short_epochs and batch_idx == 200: break
                 if ARGS.test: break
-            print('generating')
             for batch_idx, (xb,yb,idx) in enumerate(dl):
+                if ARGS.skip_pl_train: break
                 if len(xb) == 1: continue # If last batch is only one element then batchnorm will error
                 latent = self.enc(xb)
                 if noise > 0: latent = noiseify(latent,noise)
@@ -195,12 +201,16 @@ class HARLearner():
                 if ARGS.test: break
 
             if ARGS.test:
-                return -1, -1, dummy_labels(self.num_classes,len(dset.y)), np.ones(len(dset))
-            pred_array = np.concatenate(pred_list)
-            idx_array = np.concatenate(idx_list)
-            conf_array = np.concatenate(conf_list)
-            pred_array_ordered = np.array([item[0] for item in sorted(zip(pred_array,idx_array),key=lambda x:x[1])])
-            conf_array_ordered = np.array([item[0] for item in sorted(zip(conf_array,idx_array),key=lambda x:x[1])])
+                return dummy_labels(self.num_classes,len(dset.y)), np.ones(len(dset))
+            if ARGS.skip_pl_train:
+                best_pred_array_ordered = np.random.randint(self.num_classes,size=(len(dset)))
+                best_conf_array_ordered = np.random.rand(len(dset))
+            else:
+                pred_array = np.concatenate(pred_list)
+                idx_array = np.concatenate(idx_list)
+                conf_array = np.concatenate(conf_list)
+                pred_array_ordered = np.array([item[0] for item in sorted(zip(pred_array,idx_array),key=lambda x:x[1])])
+                conf_array_ordered = np.array([item[0] for item in sorted(zip(conf_array,idx_array),key=lambda x:x[1])])
             if compute_acc:
                 acc = -1 if ARGS.test else accuracy(pred_array_ordered,dset.y.detach().cpu().numpy())
                 f1 = -1 if ARGS.test else mean_f1(pred_array_ordered,dset.y.detach().cpu().numpy())
@@ -214,7 +224,8 @@ class HARLearner():
                     best_conf_array_ordered = conf_array_ordered
                     best_acc = acc
                     best_f1 = f1
-        return best_acc,best_f1,best_pred_array_ordered,best_conf_array_ordered
+        plt.plot(ls); plt.show()
+        return best_pred_array_ordered,best_conf_array_ordered
 
     def val_on(self,dset):
         self.enc.eval()
@@ -240,7 +251,6 @@ class HARLearner():
         return acc,f1,pred_array_ordered
 
     def reinit_nets(self):
-        print(888)
         for m in self.enc.modules():
             if isinstance(m,nn.Conv2d):
                 torch.nn.init.xavier_uniform(m.weight.data)
@@ -265,10 +275,11 @@ class HARLearner():
                     torch.nn.init.ones_(m.weight.data)
                     torch.nn.init.zeros_(m.bias.data)
 
-    def pseudo_label_cluster_meta_loop(self,dset,meta_pivot_pred_labels,num_meta_epochs,num_pseudo_label_epochs,selected_acts):
+    def pseudo_label_cluster_meta_loop(self,dset,meta_pivot_pred_labels,num_meta_epochs,num_pl_epochs,selected_acts):
         np_gt_labels = dset.y.detach().cpu().numpy().astype(int)
         for epoch_num in range(num_meta_epochs):
             start_time = time.time()
+            latents = self.get_latents(dset)
             if ARGS.test:
                 num_tiles = len(dset.y)//self.num_classes
                 gmm_labels = np.tile(np.arange(self.num_classes),num_tiles).astype(np.long)
@@ -278,18 +289,25 @@ class HARLearner():
                 gmm_labels = gmm_labels.astype(np.long)
                 old_gmm_labels = gmm_labels
             else:
-                latents = self.get_latents(dset)
                 c = GaussianMixture(n_components=self.num_classes,n_init=5)
                 gmm_labels = c.fit_predict(latents)
             pseudo_label_dset = deepcopy(dset)
             pseudo_label_dset.y = cudify(gmm_labels)
-            mlp_acc,mlp_f1,mlp_preds,mlp_confs = self.train_on(pseudo_label_dset,num_epochs=num_pseudo_label_epochs)
+            mlp_preds,mlp_confs = self.train_on(pseudo_label_dset,num_epochs=num_pl_epochs)
             gmm_acc = accuracy(gmm_labels,np_gt_labels)
             print('GMM accuracy:', gmm_acc)
-            print("Epoch time:", asMinutes(time.time() - start_time))
+            #print("Epoch time:", asMinutes(time.time() - start_time))
+            if ARGS.plot:
+                if latents.shape[1] > 2:
+                    if epoch_num==0: import umap
+                    u_latents = umap.UMAP().fit_transform(latents)
+                else:
+                    u_latents = latents
+                scatter_with_labels(u_latents,gmm_labels)
+                scatter_with_labels(u_latents,np_gt_labels)
         return gmm_labels
 
-    def pseudo_label_cluster_meta_meta_loop(self,dset,num_meta_meta_epochs,num_meta_epochs,num_pseudo_label_epochs,prob_thresh,selected_acts):
+    def pseudo_label_cluster_meta_meta_loop(self,dset,num_meta_meta_epochs,num_meta_epochs,num_pl_epochs,prob_thresh,selected_acts):
         y_np = numpyify(dset.y)
         best_preds_so_far = -np.ones(len(dset))
         got_by_super_masks = np.zeros(len(dset)).astype(np.bool)
@@ -303,7 +321,7 @@ class HARLearner():
         for meta_meta_epoch in range(num_meta_meta_epochs):
             print('\nMETA META EPOCH:', meta_meta_epoch)
             meta_pivot_pred_labels = best_preds_so_far if meta_meta_epoch > 0 else 'none'
-            preds, mask, super_mask, super_super_mask, mlp_accs, cluster_accs = self.pseudo_label_cluster_meta_loop(dset,meta_pivot_pred_labels, num_meta_epochs=num_meta_epochs,num_pseudo_label_epochs=num_pseudo_label_epochs,prob_thresh=prob_thresh,selected_acts=selected_acts)
+            preds, mask, super_mask, super_super_mask, mlp_accs, cluster_accs = self.pseudo_label_cluster_meta_loop(dset,meta_pivot_pred_labels, num_meta_epochs=num_meta_epochs,num_pl_epochs=num_pl_epochs,prob_thresh=prob_thresh,selected_acts=selected_acts)
             preds_histories.append(preds)
             super_mask_histories.append(super_mask)
             super_super_mask_histories.append(super_super_mask)
@@ -340,7 +358,7 @@ class HARLearner():
             preds_from_this_user = []
             accs_from_this_user = []
             print(f"training on {user_id}")
-            pseudo_labels = self.pseudo_label_cluster_meta_meta_loop(user_dset,num_meta_meta_epochs=args.num_meta_meta_epochs,num_meta_epochs=args.num_meta_epochs,num_pseudo_label_epochs=args.num_pseudo_label_epochs,prob_thresh=args.prob_thresh,selected_acts=sa)
+            pseudo_labels = self.pseudo_label_cluster_meta_meta_loop(user_dset,num_meta_meta_epochs=args.num_meta_meta_epochs,num_meta_epochs=args.num_meta_epochs,num_pl_epochs=args.num_pl_epochs,prob_thresh=args.prob_thresh,selected_acts=sa)
             self_accs.append(accuracy(pseudo_labels,numpyify(user_dset.y)))
             self_f1s.append(mean_f1(pseudo_labels,numpyify(user_dset.y)))
             self_preds.append(pseudo_labels)
@@ -378,6 +396,14 @@ class HARLearner():
             for relevant_arg in cl_args.RELEVANT_ARGS:
                 f.write(f"\n{relevant_arg}: {vars(ARGS).get(relevant_arg)}")
 
+def scatter_with_labels(X,y):
+    fig, ax = plt.subplots()
+    palette = cm.rainbow(np.linspace(0,1,len(set(y))))
+    for i,label_class in enumerate(list(set(y))):
+        mask = y==label_class
+        ax.scatter(X[mask,0], X[mask,1], s=.2, color=palette[i], label=i)
+    ax.legend()
+    plt.show()
 
 def main(args):
     prep_start_time = time.time()
@@ -416,8 +442,8 @@ def main(args):
     elif args.dset == 'UCI':
         x_filters = (60,40,4,4)
         x_strides = (2,2,1,1)
-        y_filters = (5,4,2,2)
-        y_strides = (1,1,3,1)
+        y_filters = (1,1,1,6)
+        y_strides = (1,1,1,1)
         max_pools = ((2,1),(3,1),(2,1),1)
         x_filters_trans = (30,30,20,10)
         x_strides_trans = (1,3,2,2)
@@ -461,23 +487,24 @@ def main(args):
     enc = EncByLayer(x_filters,y_filters,x_strides,y_strides,max_pools,args.nf1,show_shapes=args.show_shapes)
     #dec = DecByLayer(x_filters_trans,y_filters_trans,x_strides_trans,y_strides_trans,show_shapes=args.show_shapes)
     mlp = Var_BS_MLP(args.nf1*8,25,num_classes)
+    temp_mlp = Var_BS_MLP(args.nf1*8,50,1)
     if args.load_pretrained:
         enc.load_state_dict(torch.load('enc_pretrained.pt'))
         mlp.load_state_dict(torch.load('dec_pretrained.pt'))
-    enc.cuda()
-    mlp.cuda()
+    #enc.cuda()
+    #mlp.cuda()
+    #temp_mlp.cuda()
     subj_ids = args.subj_ids
     dset_train, dset_val, selected_acts = make_dset_train_val(args,subj_ids,train_only=False)
     if args.show_shapes:
         dl = data.DataLoader(dset_train,batch_sampler=data.BatchSampler(data.RandomSampler(dset_train),args.batch_size,drop_last=False),pin_memory=False)
-        x_time_trial_run, x_freq_trial_run, _, _ = next(iter(dl))
-        #lat = enc(torch.ones((2,1,512,num_ftrs_time),device='cuda'))
-        #lat = enc(x_time_trial_run)
+        x_trial_run, _, _ = next(iter(dl))
+        lat = enc(x_trial_run)
         #dec(lat)
         sys.exit()
 
     #har = HARLearner(enc=enc,mlp=mlp,dec=dec,temp_prox_mlp=temp_prox_mlp,batch_size=args.batch_size,temp_prox_batch_size=args.temp_prox_batch_size,num_classes=num_classes)
-    har = HARLearner(enc=enc,mlp=mlp,batch_size=args.batch_size,temp_prox_batch_size=args.temp_prox_batch_size,num_classes=num_classes)
+    har = HARLearner(enc=enc,mlp=mlp,temp_mlp=temp_mlp,batch_size=args.batch_size,temp_prox_batch_size=args.temp_prox_batch_size,num_classes=num_classes)
 
     train_start_time = time.time()
     dsets_by_id = make_dsets_by_user(args,subj_ids)
@@ -492,7 +519,7 @@ def main(args):
         accs, nmis, rand_idxs = [], [], []
         for user_id, (dset,sa) in enumerate(dsets_by_id):
             print("clustering", user_id)
-            har.pseudo_label_cluster_meta_loop(dset,'none',args.num_meta_epochs,args.num_pseudo_label_epochs,selected_acts)
+            har.pseudo_label_cluster_meta_loop(dset,'none',args.num_meta_epochs,args.num_pl_epochs,selected_acts)
     elif args.train_type == 'full':
         print("FULL TRAINING")
         har.full_train(dsets_by_id,args)
@@ -501,13 +528,13 @@ def main(args):
         har.find_similar_users(dsets_by_id,args)
     elif args.train_type == 'cluster_as_single':
         print("CLUSTERING AS SINGLE DSET")
-        har.pseudo_label_cluster_meta_meta_loop(dset_train,args.num_meta_meta_epochs,args.num_meta_epochs,args.num_pseudo_label_epochs,args.prob_thresh,selected_acts)
+        har.pseudo_label_cluster_meta_meta_loop(dset_train,args.num_meta_meta_epochs,args.num_meta_epochs,args.num_pl_epochs,args.prob_thresh,selected_acts)
     elif args.train_type == 'cluster_individually':
         print("CLUSTERING EACH DSET SEPARATELY")
         accs, nmis, rand_idxs = [], [], []
         for user_id, (dset,sa) in enumerate(dsets_by_id):
             print("clustering", user_id)
-            acc, nmi, rand_idx = har.pseudo_label_cluster_meta_meta_loop(dset,args.num_meta_meta_epochs,args.num_meta_epochs,args.num_pseudo_label_epochs,args.prob_thresh,selected_acts)
+            acc, nmi, rand_idx = har.pseudo_label_cluster_meta_meta_loop(dset,args.num_meta_meta_epochs,args.num_meta_epochs,args.num_pl_epochs,args.prob_thresh,selected_acts)
             accs.append(acc); nmis.append(nmi); rand_idxs.append(rand_idx)
         for t in zip(accs,nmis,rand_idxs):
             print(t)
@@ -521,4 +548,5 @@ def main(args):
 if __name__ == "__main__":
 
     ARGS = cl_args.get_cl_args()
+    torch.set_default_tensor_type('torch.cuda.FloatTensor')
     main(ARGS)
