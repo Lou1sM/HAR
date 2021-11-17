@@ -27,6 +27,7 @@ def get_cl_args():
     parser.add_argument('--num_meta_epochs',type=int,default=4)
     parser.add_argument('--num_meta_meta_epochs',type=int,default=4)
     parser.add_argument('--num_pl_epochs',type=int,default=3)
+    parser.add_argument('--overfit',type=int,default=-1)
     parser.add_argument('--permute_prob',type=float,default=.5)
     parser.add_argument('--plot',action='store_true')
     parser.add_argument('--prob_thresh',type=float,default=.95)
@@ -45,6 +46,7 @@ def get_cl_args():
     parser.add_argument('--window_size',type=int,default=512)
     ARGS = parser.parse_args()
 
+    if ARGS.overfit: ARGS.num_pl_epochs = 20
     if ARGS.skip_train:
         ARGS.skip_pl_train = True
         ARGS.skip_temp_train = True

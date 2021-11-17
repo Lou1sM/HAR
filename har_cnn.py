@@ -170,12 +170,14 @@ class HARLearner():
             for batch_idx, (xb,yb,idx) in enumerate(temp_prox_dl):
                 if ARGS.skip_temp_train: break
                 latent = self.enc(xb)[:,:,0,0]
+                bs = latent.shape[0]
                 #latent_dists = torch.norm(latent[:,None] - latent,dim=2)
                 #ds.append(latent_dists.mean().item())
-                #temp_prox_targets = temp_prox_targets_table[(idx - idx[:,None]).abs()]
-                temp_pred = self.temp_mlp(latent)
-                temp_target = idx*10/len(dset)
-                temp_prox_loss = self.temp_prox_lf(temp_pred,temp_target)
+                temp_prox_targets = temp_prox_targets_table[(idx - idx[:,None]).abs()].flatten()
+                latent_pairs = torch.cat((latent.tile((bs,1,1)),latent.tile((1,1,bs)).view(bs,bs,-1)),dim=2).view(bs**2,-1)
+                temp_pred = self.temp_mlp(latent_pairs)
+                #temp_target = idx*10/len(dset)
+                temp_prox_loss = self.temp_prox_lf(temp_pred,temp_prox_targets)
                 ls.append(temp_prox_loss.item())
                 temp_prox_loss.backward()
                 self.enc_opt.step(); self.enc_opt.zero_grad()
@@ -224,7 +226,7 @@ class HARLearner():
                     best_conf_array_ordered = conf_array_ordered
                     best_acc = acc
                     best_f1 = f1
-        plt.plot(ls); plt.show()
+        if ARGS.plot: plt.plot(ls); plt.show()
         return best_pred_array_ordered,best_conf_array_ordered
 
     def val_on(self,dset):
@@ -276,6 +278,9 @@ class HARLearner():
                     torch.nn.init.zeros_(m.bias.data)
 
     def pseudo_label_cluster_meta_loop(self,dset,meta_pivot_pred_labels,num_meta_epochs,num_pl_epochs,selected_acts):
+        if ARGS.overfit != -1:
+            dset.x = dset.x[:512 + 5*(ARGS.overfit-1)]
+            dset.y = dset.y[:ARGS.overfit]
         np_gt_labels = dset.y.detach().cpu().numpy().astype(int)
         for epoch_num in range(num_meta_epochs):
             start_time = time.time()
@@ -289,13 +294,15 @@ class HARLearner():
                 gmm_labels = gmm_labels.astype(np.long)
                 old_gmm_labels = gmm_labels
             else:
-                c = GaussianMixture(n_components=self.num_classes,n_init=5)
-                gmm_labels = c.fit_predict(latents)
+                for i in range(5):
+                    c = GaussianMixture(n_components=self.num_classes,n_init=5)
+                    gmm_labels = c.fit_predict(latents)
+                    if not ARGS.overfit:
+                        gmm_acc = accuracy(gmm_labels,np_gt_labels)
+                        print(f'GMM{i} accuracy:, {gmm_acc}')
             pseudo_label_dset = deepcopy(dset)
             pseudo_label_dset.y = cudify(gmm_labels)
             mlp_preds,mlp_confs = self.train_on(pseudo_label_dset,num_epochs=num_pl_epochs)
-            gmm_acc = accuracy(gmm_labels,np_gt_labels)
-            print('GMM accuracy:', gmm_acc)
             #print("Epoch time:", asMinutes(time.time() - start_time))
             if ARGS.plot:
                 if latents.shape[1] > 2:
@@ -487,7 +494,7 @@ def main(args):
     enc = EncByLayer(x_filters,y_filters,x_strides,y_strides,max_pools,args.nf1,show_shapes=args.show_shapes)
     #dec = DecByLayer(x_filters_trans,y_filters_trans,x_strides_trans,y_strides_trans,show_shapes=args.show_shapes)
     mlp = Var_BS_MLP(args.nf1*8,25,num_classes)
-    temp_mlp = Var_BS_MLP(args.nf1*8,50,1)
+    temp_mlp = Var_BS_MLP(2*args.nf1*8,500,1)
     if args.load_pretrained:
         enc.load_state_dict(torch.load('enc_pretrained.pt'))
         mlp.load_state_dict(torch.load('dec_pretrained.pt'))
