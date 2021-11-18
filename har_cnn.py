@@ -88,19 +88,26 @@ class DecByLayer(nn.Module):
         return x
 
 class Var_BS_MLP(nn.Module):
-    def __init__(self,input_size,hidden_size,output_size):
+    def __init__(self,input_size,hidden_size,output_size,sym=False):
         super(Var_BS_MLP,self).__init__()
+        self.input_size = input_size
+        self.sym = sym
         self.fc1 = nn.Linear(input_size,hidden_size)
         self.bn1 = nn.BatchNorm1d(hidden_size)
-        self.act1 = nn.LeakyReLU(0.3)
-        self.fc2 = nn.Linear(hidden_size,output_size)
+        self.act1 = torch.abs
+        self.fc2 = nn.Linear(hidden_size,output_size,bias=not sym)
+        self.act2 = nn.Tanh()
 
     def forward(self,x):
-        x = self.fc1(x)
-        if x.shape[0] != 1:
-            x = self.bn1(x)
+        if self.sym:
+            x = self.fc1(x[:,:self.input_size])-self.fc1(x[:,self.input_size:])
+        else:
+            x = self.fc1(x)
+        #if x.shape[0] != 1:
+            #x = self.bn1(x)
         x = self.act1(x)
         x = self.fc2(x)
+        x = self.act2(x)
         return x
 
 class ProximalSampler(data.Sampler):
@@ -129,7 +136,7 @@ class HARLearner():
         self.temp_mlp = temp_mlp
         self.rec_lf = nn.MSELoss(reduction='none')
         self.pseudo_label_lf = avoid_minus_ones_lf_wrapper(nn.CrossEntropyLoss(reduction='none'))
-        self.temp_prox_lf = nn.MSELoss()
+        self.temp_prox_lf = nn.L1Loss(reduction='none')
 
         self.enc_opt = torch.optim.Adam(self.enc.parameters(),lr=ARGS.enc_lr)
         self.mlp_opt = torch.optim.Adam(self.mlp.parameters(),lr=ARGS.mlp_lr)
@@ -159,7 +166,8 @@ class HARLearner():
         is_mask = multiplicative_mask is not 'none'
         temp_prox_sampler = ProximalSampler(dset, permute_prob=ARGS.permute_prob)
         temp_prox_dl = data.DataLoader(dset,batch_sampler=data.BatchSampler(temp_prox_sampler,self.temp_prox_batch_size,drop_last=False),pin_memory=False)
-        temp_prox_targets_table = torch.log(torch.arange(1,len(dset)+1)).float()
+        temp_prox_targets_table = torch.log(torch.arange(1,len(dset)+1).float())
+        temp_prox_targets_table /= temp_prox_targets_table.max()
         ls = []
         ds = []
         for epoch in range(num_epochs):
@@ -167,23 +175,26 @@ class HARLearner():
             idx_list = []
             conf_list = []
             best_f1 = 0
+            befores = [numpyify(x) for x in self.enc.parameters()]
             for batch_idx, (xb,yb,idx) in enumerate(temp_prox_dl):
                 if ARGS.skip_temp_train: break
                 latent = self.enc(xb)[:,:,0,0]
-                bs = latent.shape[0]
-                #latent_dists = torch.norm(latent[:,None] - latent,dim=2)
-                #ds.append(latent_dists.mean().item())
+                bs,nz = latent.shape
                 temp_prox_targets = temp_prox_targets_table[(idx - idx[:,None]).abs()].flatten()
-                latent_pairs = torch.cat((latent.tile((bs,1,1)),latent.tile((1,1,bs)).view(bs,bs,-1)),dim=2).view(bs**2,-1)
-                temp_pred = self.temp_mlp(latent_pairs)
-                #temp_target = idx*10/len(dset)
-                temp_prox_loss = self.temp_prox_lf(temp_pred,temp_prox_targets)
+                latent_pairs = get_all_pairs(latent)
+                temp_pred = self.temp_mlp(latent_pairs).squeeze(1)
+                temp_prox_loss_ = self.temp_prox_lf(temp_pred,temp_prox_targets)
+                temp_prox_loss = temp_prox_loss_.mean()
                 ls.append(temp_prox_loss.item())
                 temp_prox_loss.backward()
+                if temp_prox_loss > 0.3 and batch_idx > 100: set_trace()
+                if epoch==num_epochs-1 and batch_idx==200: set_trace()
                 self.enc_opt.step(); self.enc_opt.zero_grad()
                 self.temp_mlp_opt.step(); self.temp_mlp_opt.zero_grad()
-                if ARGS.short_epochs and batch_idx == 200: break
                 if ARGS.test: break
+            afters = [numpyify(x) for x in self.enc.parameters()]
+            changed = any([(a!=b).any() for a,b in zip(afters,befores)])
+            if not changed: set_trace()
             for batch_idx, (xb,yb,idx) in enumerate(dl):
                 if ARGS.skip_pl_train: break
                 if len(xb) == 1: continue # If last batch is only one element then batchnorm will error
@@ -226,7 +237,7 @@ class HARLearner():
                     best_conf_array_ordered = conf_array_ordered
                     best_acc = acc
                     best_f1 = f1
-        if ARGS.plot: plt.plot(ls); plt.show()
+        plt.plot(ls); plt.show()
         return best_pred_array_ordered,best_conf_array_ordered
 
     def val_on(self,dset):
@@ -297,7 +308,7 @@ class HARLearner():
                 for i in range(5):
                     c = GaussianMixture(n_components=self.num_classes,n_init=5)
                     gmm_labels = c.fit_predict(latents)
-                    if not ARGS.overfit:
+                    if ARGS.overfit == -1:
                         gmm_acc = accuracy(gmm_labels,np_gt_labels)
                         print(f'GMM{i} accuracy:, {gmm_acc}')
             pseudo_label_dset = deepcopy(dset)
@@ -305,6 +316,7 @@ class HARLearner():
             mlp_preds,mlp_confs = self.train_on(pseudo_label_dset,num_epochs=num_pl_epochs)
             #print("Epoch time:", asMinutes(time.time() - start_time))
             if ARGS.plot:
+                continue
                 if latents.shape[1] > 2:
                     if epoch_num==0: import umap
                     u_latents = umap.UMAP().fit_transform(latents)
@@ -412,6 +424,9 @@ def scatter_with_labels(X,y):
     ax.legend()
     plt.show()
 
+def get_all_pairs(t):
+    bs = t.shape[0]
+    return torch.cat((t.tile((bs,1,1)),t.tile((1,1,bs)).view(bs,bs,-1)),dim=2).view(bs**2,-1)
 def main(args):
     prep_start_time = time.time()
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
@@ -494,7 +509,7 @@ def main(args):
     enc = EncByLayer(x_filters,y_filters,x_strides,y_strides,max_pools,args.nf1,show_shapes=args.show_shapes)
     #dec = DecByLayer(x_filters_trans,y_filters_trans,x_strides_trans,y_strides_trans,show_shapes=args.show_shapes)
     mlp = Var_BS_MLP(args.nf1*8,25,num_classes)
-    temp_mlp = Var_BS_MLP(2*args.nf1*8,500,1)
+    temp_mlp = Var_BS_MLP(args.nf1*8,500,1,sym=True)
     if args.load_pretrained:
         enc.load_state_dict(torch.load('enc_pretrained.pt'))
         mlp.load_state_dict(torch.load('dec_pretrained.pt'))

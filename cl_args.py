@@ -46,7 +46,7 @@ def get_cl_args():
     parser.add_argument('--window_size',type=int,default=512)
     ARGS = parser.parse_args()
 
-    if ARGS.overfit: ARGS.num_pl_epochs = 20
+    if ARGS.overfit != -1: ARGS.num_pl_epochs = 200
     if ARGS.skip_train:
         ARGS.skip_pl_train = True
         ARGS.skip_temp_train = True
