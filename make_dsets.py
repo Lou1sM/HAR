@@ -111,7 +111,7 @@ def make_pamap_dset_train_val(args,subj_ids,train_only):
     x_val = np.concatenate([np.load(f'datasets/PAMAP2_Dataset/np_data/subject{s}.npy') for s in val_ids])
     y_val = np.concatenate([np.load(f'datasets/PAMAP2_Dataset/np_data/subject{s}_labels.npy') for s in val_ids])
     x_time_val,y_val,selected_acts = preproc_xys(x_val,y_val,args.step_size,args.window_size,action_name_dict)
-    dset_val = TimeFrequencyStepDataset(x_time_val,y_val,device='cuda',window_size=args.window_size,step_size=args.step_size)
+    dset_val = StepDataset(x_time_val,y_val,device='cuda',window_size=args.window_size,step_size=args.step_size)
     return dset_train, dset_val, selected_acts
 
 def make_uci_dset_train_val(args,subj_ids,train_only):
