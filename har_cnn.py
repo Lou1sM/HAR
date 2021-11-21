@@ -139,7 +139,6 @@ class HARLearner():
         sampler = data.RandomSampler(dset) if custom_sampler is 'none' else custom_sampler
         dl = data.DataLoader(dset,batch_sampler=data.BatchSampler(sampler,self.batch_size,drop_last=False),pin_memory=False)
         is_mask = multiplicative_mask is not 'none'
-        idx_diffs = torch.arange(len(dset))[:,None] - torch.arange(len(dset))
         temp_prox_sampler = ProximalSampler(dset, permute_prob=ARGS.permute_prob)
         temp_prox_dl = data.DataLoader(dset,batch_sampler=data.BatchSampler(temp_prox_sampler,self.temp_prox_batch_size,drop_last=False),pin_memory=False)
         temp_prox_targets_table = torch.log(torch.arange(1,len(dset)+1)).cuda()
@@ -154,15 +153,15 @@ class HARLearner():
                 if noise > 0: latent = noiseify(latent,noise)
                 #label_pred = self.mlp(latent) if latent.ndim == 2 else self.mlp(latent[:,:,0,0])
                 label_pred = self.mlp(latent[:,:,0,0])
-                #batch_mask = 'none' if not is_mask  else multiplicative_mask[:self.batch_size] if ARGS.test else multiplicative_mask[idx]
-                #loss = lf(label_pred,yb.long(),batch_mask)
-                #if math.isnan(loss): set_trace()
+                batch_mask = 'none' if not is_mask  else multiplicative_mask[:self.batch_size] if ARGS.test else multiplicative_mask[idx]
+                loss = lf(label_pred,yb.long(),batch_mask)
+                if math.isnan(loss): set_trace()
                 #if rlmbda>0:
                 #    rec_loss = self.rec_lf(self.dec(latent),xb).mean()
                 #    loss += rlmbda*rec_loss
-                #loss.backward()
-                #self.enc_opt.step(); self.enc_opt.zero_grad()
-                #self.mlp_opt.step(); self.mlp_opt.zero_grad()
+                loss.backward()
+                self.enc_opt.step(); self.enc_opt.zero_grad()
+                self.mlp_opt.step(); self.mlp_opt.zero_grad()
                 #if rlmbda>0: self.dec_opt.step(); self.dec_opt.zero_grad()
                 conf,pred = label_pred.max(axis=1)
                 pred_list.append(numpyify(pred))
@@ -170,17 +169,19 @@ class HARLearner():
                 idx_list.append(idx.detach().cpu().numpy())
                 if ARGS.test: break
 
-            for batch_idx, (xb,yb,idx) in enumerate(temp_prox_dl):
-                latent = self.enc(xb)[:,:,0,0]
-                bs = latent.shape[0]
-                set_trace()
-                latent_dists = torch.norm(latent[:,None] - latent,dim=2)
-                temp_prox_targets = temp_prox_targets_table[(idx - idx[:,None]).abs()]
-                temp_prox_loss = self.temp_prox_lf(latent_dists,temp_prox_targets)
-                temp_prox_loss.backward()
-                self.enc_opt.step(); self.enc_opt.zero_grad()
-                if ARGS.short_epochs and batch_idx == 200: break
-                if ARGS.test: break
+            #for batch_idx, (xb,yb,idx) in enumerate(temp_prox_dl):
+            #    latent = self.enc(xb)[:,:,0,0]
+            #    bs = latent.shape[0]
+            #    should_be_close = (idx-idx[:,None]).abs() < 500
+            #    latent_dists = torch.norm(latent[:,None] - latent,dim=2).triu(diagonal=1)
+            #    dists = should_be_close*latent_dists - ~should_be_close*latent_dists*0.1
+            #    #temp_prox_targets = temp_prox_targets_table[(idx - idx[:,None]).abs()]
+            #    #temp_prox_loss = self.temp_prox_lf(latent_dists,temp_prox_targets)
+            #    #temp_prox_loss.backward()
+            #    dists.mean().backward()
+            #    self.enc_opt.step(); self.enc_opt.zero_grad()
+            #    if ARGS.short_epochs and batch_idx == 200: break
+            #    if ARGS.test: break
             if ARGS.test:
                 return -1, -1, dummy_labels(self.num_classes,len(dset.y)), np.ones(len(dset))
             pred_array = np.concatenate(pred_list)
@@ -526,8 +527,8 @@ def main(args):
     mlp.cuda()
     temp_prox_mlp.cuda()
     subj_ids = args.subj_ids
-    dset_train, dset_val, selected_acts = make_dset_train_val(args,subj_ids,train_only=False)
     if args.show_shapes:
+        dset_train, dset_val, selected_acts = make_dset_train_val(args,subj_ids,train_only=False)
         dl = data.DataLoader(dset_train,batch_sampler=data.BatchSampler(data.RandomSampler(dset_train),args.batch_size,drop_last=False),pin_memory=False)
         x_time_trial_run, x_freq_trial_run, _, _ = next(iter(dl))
         #lat = enc(torch.ones((2,1,512,num_ftrs_time),device='cuda'))
@@ -555,9 +556,11 @@ def main(args):
         har.full_train(dsets_by_id,args)
     elif args.train_type == 'find_similar_users':
         print("FULL TRAINING")
+        dset_train, dset_val, selected_acts = make_dset_train_val(args,subj_ids,train_only=False)
         har.find_similar_users(dsets_by_id,args)
     elif args.train_type == 'cluster_as_single':
         print("CLUSTERING AS SINGLE DSET")
+        dset_train, dset_val, selected_acts = make_dset_train_val(args,subj_ids,train_only=False)
         har.pseudo_label_cluster_meta_meta_loop(dset_train,args.num_meta_meta_epochs,args.num_meta_epochs,args.num_pseudo_label_epochs,args.prob_thresh,selected_acts)
     elif args.train_type == 'cluster_individually':
         print("CLUSTERING EACH DSET SEPARATELY")
@@ -579,4 +582,5 @@ if __name__ == "__main__":
 
     ARGS, need_umap = cl_args.get_cl_args()
     if need_umap: import umap
+    torch.set_default_tensor_type('torch.cuda.FloatTensor')
     main(ARGS)
