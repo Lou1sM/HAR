@@ -16,6 +16,8 @@ from dl_utils.tensor_funcs import noiseify, numpyify, cudify
 from make_dsets import make_dset_train_val, make_dsets_by_user
 from sklearn.metrics import normalized_mutual_info_score,adjusted_rand_score
 
+rari = lambda x,y: round(adjusted_rand_score(x,y),4)
+rnmi = lambda x,y: round(normalized_mutual_info_score(x,y),4)
 
 class EncByLayer(nn.Module):
     def __init__(self,x_filters,y_filters,x_strides,y_strides,max_pools,show_shapes):
@@ -352,27 +354,52 @@ class HARLearner():
         debabled_mega_ultra_preds = debable(mega_ultra_preds,'none')
         start_idxs = [sum([len(d) for d,sa in user_dsets[:i]]) for i in range(len(user_dsets)+1)]
         mlp_self_preds = [debabled_mega_ultra_preds[uid][start_idxs[uid]:start_idxs[uid+1]] for uid in range(len(user_dsets))]
-        true_mlp_accs = [accuracy(p,numpyify(d.y)) for p,(d,sa) in zip(mlp_self_preds,user_dsets)]
-        true_f1s = [mean_f1(p,numpyify(d.y)) for p,(d,sa) in zip(mlp_self_preds,user_dsets)]
         hmm_self_preds = [translate_labellings(sa,ta) for sa,ta in zip(self_preds,mlp_self_preds)]
-        true_hmm_accs = [accuracy(p,numpyify(d.y)) for p,(d,sa) in zip(hmm_self_preds,user_dsets)]
+
+        mlp_accs = [accuracy(p,numpyify(d.y)) for p,(d,sa) in zip(mlp_self_preds,user_dsets)]
+        mlp_f1s = [mean_f1(p,numpyify(d.y)) for p,(d,sa) in zip(mlp_self_preds,user_dsets)]
+        mlp_aris = [rari(p,numpyify(d.y)) for p,(d,sa) in zip(mlp_self_preds,user_dsets)]
+        mlp_nmis = [rnmi(p,numpyify(d.y)) for p,(d,sa) in zip(mlp_self_preds,user_dsets)]
+        hmm_accs = [accuracy(p,numpyify(d.y)) for p,(d,sa) in zip(hmm_self_preds,user_dsets)]
+        hmm_f1s = [mean_f1(p,numpyify(d.y)) for p,(d,sa) in zip(hmm_self_preds,user_dsets)]
+        hmm_aris = [rari(p,numpyify(d.y)) for p,(d,sa) in zip(hmm_self_preds,user_dsets)]
+        hmm_nmis = [rnmi(p,numpyify(d.y)) for p,(d,sa) in zip(hmm_self_preds,user_dsets)]
         total_num_dpoints = sum(len(ud) for ud,sa in user_dsets)
         check_dir(f'experiments/{args.exp_name}')
         with open(f'experiments/{args.exp_name}/results.txt','w') as f:
-            for n,acc_list in zip(('reflexive','mlp','hmm'),(self_accs,true_mlp_accs,true_hmm_accs)):
+            for n,acc_list in zip(('reflexive','mlp','hmm'),(self_accs,mlp_accs,hmm_accs)):
                 avg_acc = sum([a*len(ud) for a, (ud, sa) in zip(acc_list, user_dsets)])/total_num_dpoints
                 print(f'Acc {n}: {round(avg_acc,5)}')
                 f.write(f'Acc {n}: {round(avg_acc,5)}\n')
-            for n,f1_list in zip(('reflexive','legit'),(self_f1s,true_f1s)):
+            for n,f1_list in zip(('mlp','hmm'),(mlp_f1s,hmm_f1s)):
                 avg_f1 = sum([a*len(ud) for a, (ud, sa) in zip(f1_list, user_dsets)])/total_num_dpoints
                 print(f'F1 {n}: {round(avg_f1,5)}')
                 f.write(f'F1 {n}: {round(avg_f1,5)}\n')
+            for n,ari_list in zip(('mlp','hmm'),(mlp_aris,hmm_aris)):
+                avg_ari = sum([a*len(ud) for a, (ud, sa) in zip(ari_list, user_dsets)])/total_num_dpoints
+                print(f'ARI {n}: {round(avg_ari,5)}')
+                f.write(f'ARI {n}: {round(avg_ari,5)}\n')
+            for n,nmi_list in zip(('mlp','hmm'),(mlp_nmis,hmm_nmis)):
+                avg_nmi = sum([a*len(ud) for a, (ud, sa) in zip(nmi_list, user_dsets)])/total_num_dpoints
+                print(f'NMI {n}: {round(avg_nmi,5)}')
+                f.write(f'NMI {n}: {round(avg_nmi,5)}\n')
             f.write('\nAll mlp_accs\n')
-            f.write(' '.join([str(a) for a in true_mlp_accs])+'\n')
+            f.write(' '.join([str(a) for a in mlp_accs])+'\n')
+            f.write('\nAll mlp_f1s\n')
+            f.write(' '.join([str(a) for a in mlp_accs])+'\n')
+            f.write('\nAll mlp_aris\n')
+            f.write(' '.join([str(a) for a in mlp_accs])+'\n')
+            f.write('\nAll mlp_nmis\n')
+            f.write(' '.join([str(a) for a in mlp_accs])+'\n')
+
             f.write('\nAll hmm_accs\n')
-            f.write(' '.join([str(a) for a in true_hmm_accs])+'\n')
-            f.write('All f1s\n')
-            f.write(' '.join([str(f) for f in true_f1s]))
+            f.write(' '.join([str(a) for a in hmm_accs])+'\n')
+            f.write('\nAll hmm_f1s\n')
+            f.write(' '.join([str(a) for a in hmm_accs])+'\n')
+            f.write('\nAll hmm_aris\n')
+            f.write(' '.join([str(a) for a in hmm_accs])+'\n')
+            f.write('\nAll hmm_nmis\n')
+            f.write(' '.join([str(a) for a in hmm_accs])+'\n')
             for relevant_arg in cl_args.RELEVANT_ARGS:
                 f.write(f"\n{relevant_arg}: {vars(ARGS).get(relevant_arg)}")
 
