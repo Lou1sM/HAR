@@ -33,7 +33,6 @@ def convert(inpath,outpath):
     np.save(outpath+'_timestamps',timestamps)
     np.save(outpath+'_labels',labels)
     np.save(outpath,array)
-    print(f"Array for {outpath} is of shape {array.shape}")
 
 def expand_and_fill_labels(a,propoer_length):
     start_filler = -np.ones(a[0,3])
@@ -50,19 +49,22 @@ def add_dtft(signal):
 
 if __name__ == "__main__":
     if sys.argv[1] == 'PAMAP':
-        data_dir = 'datasets/PAMAP2_Dataset/Protocol'
-        np_dir = 'datasets/PAMAP2_Dataset/np_data'
+        data_dir = 'PAMAP2_Dataset/Protocol'
+        np_dir = 'PAMAP2_Dataset/np_data'
+        print("\n#####Preprocessing PAMAP2#####\n")
         if not os.path.isdir(np_dir):
             os.makedirs(np_dir)
 
         for filename in os.listdir(data_dir):
+            print(filename)
             inpath = os.path.join(data_dir,filename)
             outpath = os.path.join(np_dir,filename.split('.')[0])
             convert(inpath,outpath)
 
     elif sys.argv[1] == 'UCI-raw':
-        data_dir = 'datasets/UCI2/RawData'
-        np_dir = 'Udatasets/CI2/np_data'
+        data_dir = 'UCI2/RawData'
+        np_dir = 'UCI2/np_data'
+        print("\n#####Preprocessing UCI2#####\n")
         if not os.path.isdir(np_dir):
             os.makedirs(np_dir)
 
@@ -70,6 +72,7 @@ if __name__ == "__main__":
         def two_digitify(x): return '0'+str(x) if len(str(x))==1 else str(x)
         fnames = os.listdir(data_dir)
         for idx in range(1,31):
+            print("processing user",idx)
             acc_array_list = []
             gyro_array_list = []
             label_array_list = []
@@ -107,53 +110,9 @@ if __name__ == "__main__":
         np.save('UCI2/X_train.npy',one_big_X_array)
         np.save('UCI2/y_train.npy',one_big_y_array)
 
-    elif sys.argv[1] == 'WISDM-watch':
-        p_dir = 'wisdm-dataset/raw/phone'
-        w_dir = 'wisdm-dataset/raw/watch'
-        save_dir = 'wisdm-dataset/np_data'
-        if not os.path.isdir(np_dir):
-            os.makedirs(np_dir)
-
-        mp.dps = 100 # Avoid floating point errors in label insertion function
-        for user_idx in range(1600,1651):
-            phone_acc_path = os.path.join(p_dir,'accel',f'data_{user_idx}_accel_phone.txt')
-            watch_acc_path = os.path.join(w_dir,'accel',f'data_{user_idx}_accel_watch.txt')
-            phone_gyro_path = os.path.join(p_dir,'gyro',f'data_{user_idx}_gyro_phone.txt')
-            watch_gyro_path = os.path.join(w_dir,'gyro',f'data_{user_idx}_gyro_watch.txt')
-
-            label_codes_list = list('ABCDEFGHIJKLMOPQRS') # Missin 'N' is deliberate
-            def two_arrays_from_txt(inpath):
-                with open(inpath) as f:
-                    d = f.readlines()
-                    arr = np.array([[float(x) for x in line.strip(';\n').split(',')[3:]] for line in d])
-                    label_array = np.array([label_codes_list.index(line.split(',')[1]) for line in d])
-                return arr, label_array
-
-            phone_acc, label_array1 = two_arrays_from_txt(phone_acc_path)
-            watch_acc, label_array2 = two_arrays_from_txt(watch_acc_path)
-            phone_gyro, label_array3 = two_arrays_from_txt(phone_gyro_path)
-            watch_gyro, label_array4 = two_arrays_from_txt(watch_gyro_path)
-            user_arrays = [phone_acc,watch_acc,phone_gyro,watch_gyro]
-            label_arrays = [label_array1,label_array2,label_array3,label_array4]
-            max_len = max([a.shape[0] for a in user_arrays])
-            equalized_user_arrays = [array_expanded(a,max_len) for a in user_arrays]
-            equalized_label_arrays = [array_expanded(lab_a,max_len) for lab_a in label_arrays]
-            total_user_array = np.concatenate(equalized_user_arrays,axis=1)
-            print(total_user_array.shape)
-            mode_object = stats.mode(np.stack(equalized_label_arrays,axis=1),axis=1)
-            mode_labels = mode_object.mode[:,0]
-            # Print how many windows contained just 1 label, how many 2 etc.
-            print('Agreement in labels:',label_funcs.label_counts(mode_object.count[:,0]))
-            certains = (mode_object.count == 4)[:,0]
-            user_fn = f'{user_idx}.npy'
-            misc.np_save(total_user_array,save_dir,user_fn)
-            user_labels_fn = f'{user_idx}_labels.npy'
-            misc.np_save(mode_labels,save_dir,user_labels_fn)
-            user_certains_fn = f'{user_idx}_certains.npy'
-            misc.np_save(certains,save_dir,user_certains_fn)
-
     elif sys.argv[1] == 'WISDM-v1':
         with open('WISDM_ar_v1.1/WISDM_ar_v1.1_raw.txt') as f: text = f.readlines()
+        print("\n#####Preprocessing WISDM-v1#####\n")
         activities_list = ['Jogging','Walking','Upstairs','Downstairs','Standing','Sitting']
         X_list = []
         y_list = []
@@ -191,27 +150,73 @@ if __name__ == "__main__":
         print(one_big_users_array.shape)
         print(f"Number of zero lines: {num_zeros}")
         misc.np_save(one_big_X_array,'wisdm_v1','X.npy')
-        misc.np_save(one_big_y_array,'datasets/wisdm_v1','y.npy')
-        misc.np_save(one_big_users_array,'datasets/wisdm_v1','users.npy')
+        misc.np_save(one_big_y_array,'wisdm_v1','y.npy')
+        misc.np_save(one_big_users_array,'wisdm_v1','users.npy')
 
-    elif sys.argv[1] == 'Capture24':
-        np_dir = 'datasets/capture24/np_data'
+    elif sys.argv[1] == 'WISDM-watch':
+        p_dir = 'wisdm-dataset/raw/phone'
+        w_dir = 'wisdm-dataset/raw/watch'
+        np_dir = 'wisdm-dataset/np_data'
+        print("\n#####Preprocessing WISDM-watch#####\n")
         if not os.path.isdir(np_dir):
             os.makedirs(np_dir)
-        name_df = pd.read_csv('datasets/capture24/annotation-label-dictionary.csv')
+
+        mp.dps = 100 # Avoid floating point errors in label insertion function
+        for user_idx in range(1600,1651):
+            phone_acc_path = os.path.join(p_dir,'accel',f'data_{user_idx}_accel_phone.txt')
+            watch_acc_path = os.path.join(w_dir,'accel',f'data_{user_idx}_accel_watch.txt')
+            phone_gyro_path = os.path.join(p_dir,'gyro',f'data_{user_idx}_gyro_phone.txt')
+            watch_gyro_path = os.path.join(w_dir,'gyro',f'data_{user_idx}_gyro_watch.txt')
+
+            label_codes_list = list('ABCDEFGHIJKLMOPQRS') # Missin 'N' is deliberate
+            def two_arrays_from_txt(inpath):
+                with open(inpath) as f:
+                    d = f.readlines()
+                    arr = np.array([[float(x) for x in line.strip(';\n').split(',')[3:]] for line in d])
+                    label_array = np.array([label_codes_list.index(line.split(',')[1]) for line in d])
+                return arr, label_array
+
+            phone_acc, label_array1 = two_arrays_from_txt(phone_acc_path)
+            watch_acc, label_array2 = two_arrays_from_txt(watch_acc_path)
+            phone_gyro, label_array3 = two_arrays_from_txt(phone_gyro_path)
+            watch_gyro, label_array4 = two_arrays_from_txt(watch_gyro_path)
+            user_arrays = [phone_acc,watch_acc,phone_gyro,watch_gyro]
+            label_arrays = [label_array1,label_array2,label_array3,label_array4]
+            max_len = max([a.shape[0] for a in user_arrays])
+            equalized_user_arrays = [array_expanded(a,max_len) for a in user_arrays]
+            equalized_label_arrays = [array_expanded(lab_a,max_len) for lab_a in label_arrays]
+            total_user_array = np.concatenate(equalized_user_arrays,axis=1)
+            print(total_user_array.shape)
+            mode_object = stats.mode(np.stack(equalized_label_arrays,axis=1),axis=1)
+            mode_labels = mode_object.mode[:,0]
+            # Print how many windows contained just 1 label, how many 2 etc.
+            print('Agreement in labels:',label_funcs.label_counts(mode_object.count[:,0]))
+            certains = (mode_object.count == 4)[:,0]
+            user_fn = f'{user_idx}.npy'
+            misc.np_save(total_user_array,np_dir,user_fn)
+            user_labels_fn = f'{user_idx}_labels.npy'
+            misc.np_save(mode_labels,np_dir,user_labels_fn)
+            user_certains_fn = f'{user_idx}_certains.npy'
+            misc.np_save(certains,np_dir,user_certains_fn)
+
+    elif sys.argv[1] == 'Capture24':
+        np_dir = 'capture24/np_data'
+        if not os.path.isdir(np_dir):
+            os.makedirs(np_dir)
+        name_df = pd.read_csv('capture24/annotation-label-dictionary.csv')
         #name_conversion_dict = dict(zip(name_df['annotation'],name_df['label:DohertySpecific2018']))
         name_df = name_df[['annotation','label:DohertySpecific2018']]
         int_label_converter_df = pd.DataFrame(enumerate(name_df['label:DohertySpecific2018'].unique()),columns=['int_label','label:DohertySpecific2018'])
         int_label_converter_dict = dict(enumerate(name_df['label:DohertySpecific2018'].unique()))
-        with open('datasets/capture24/int_label_converter_df.json','w') as f:
+        with open('capture24/int_label_converter_df.json','w') as f:
             json.dump(int_label_converter_dict,f)
         name_df = name_df.merge(int_label_converter_df)
-        for fname in os.listdir('datasets/capture24'):
+        for fname in os.listdir('capture24'):
             if fname.endswith('.gz'): continue
             subj_id = fname.split('.')[0]
             if not subj_id.startswith('P') and not len(subj_id) == 4: continue # Skip metadata files
             print(f"converting {fname} to np")
-            try: df = pd.read_csv(os.path.join('datasets/capture24',fname))
+            try: df = pd.read_csv(os.path.join('capture24',fname))
             except: set_trace()
             translated_df = df.merge(name_df)
             x = translated_df[['x','y','z']].to_numpy()

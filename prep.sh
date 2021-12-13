@@ -3,40 +3,51 @@
 mkdir -p datasets
 cd datasets
 pwd
-#wget https://archive.ics.uci.edu/ml/machine-learning-databases/00227/PAMAP2_Dataset.zip
+
+#PAMAP
+#wget http://archive.ics.uci.edu/ml/machine-learning-databases/00231/PAMAP2_Dataset.zip
 #unzip PAMAP2_Dataset.zip
 #python ../convert_data_to_np.py PAMAP
-#mkdir -p UCI2
-#cd UCI2
-#pwd
+
+#UCI
+mkdir -p UCI2
+cd UCI2
+pwd
 #wget http://archive.ics.uci.edu/ml/machine-learning-databases/00341/HAPT%20Data%20Set.zip
 #unzip HAPT\ Data\ Set.zip
-#cd ..
-#pwd
+cd ..
+pwd
 #python ../convert_data_to_np.py UCI-raw
-wget https://archive.ics.uci.edu/ml/machine-learning-databases/00507/wisdm-dataset.zip
-unzip ../wisdm-dataset.zip
-python ../convert_data_to_np.py WISDM-watch
-#wget https://www.cis.fordham.edu/wisdm/includes/datasets/latest/WISDM_ar_latest.tar.gz
-#gunzip WISDM_ar_latest.tar.gz
-#tar -xf WISDM_ar_latest.tar
 
-mkdir -p capture24
-cd capture24/
+#WISDM-watch
+#wget https://archive.ics.uci.edu/ml/machine-learning-databases/00507/wisdm-dataset.zip
+#unzip wisdm-dataset.zip
+#python ../convert_data_to_np.py WISDM-watch
 
-for i in $(seq -w 151)
-do
-    curl -JLO "https://ora.ox.ac.uk/objects/uuid:92650814-a209-4607-9fb5-921eab761c11/download_file?safe_filename=P${i}.csv.gz&type_of_work=Dataset"
-done
+#mkdir -p capture24
+#cd capture24/
 
-curl -JLO "https://ora.ox.ac.uk/objects/uuid:92650814-a209-4607-9fb5-921eab761c11/download_file?safe_filename=metadata.csv&type_of_work=Dataset"
-curl -JLO "https://ora.ox.ac.uk/objects/uuid:92650814-a209-4607-9fb5-921eab761c11/download_file?safe_filename=annotation-label-dictionary.csv&type_of_work=Dataset"
+#for i in $(seq -w 151)
+#do
+#    curl -JLO "https://ora.ox.ac.uk/objects/uuid:92650814-a209-4607-9fb5-921eab761c11/download_file?safe_filename=P${i}.csv.gz&type_of_work=Dataset"
+#done
+#
+#curl -JLO "https://ora.ox.ac.uk/objects/uuid:92650814-a209-4607-9fb5-921eab761c11/download_file?safe_filename=metadata.csv&type_of_work=Dataset"
+#curl -JLO "https://ora.ox.ac.uk/objects/uuid:92650814-a209-4607-9fb5-921eab761c11/download_file?safe_filename=annotation-label-dictionary.csv&type_of_work=Dataset"
+#
+#
+#for f in $(ls); do 
+#    if [ ${f: -2} == "gz" ]; then 
+#        gunzip $f; 
+#    fi; 
+#done
 
+#WISDM-v1
+wget https://www.cis.fordham.edu/wisdm/includes/datasets/latest/WISDM_ar_latest.tar.gz
+gunzip WISDM_ar_latest.tar.gz
+tar -xf WISDM_ar_latest.tar
 
-for f in $(ls); do 
-    if [ ${f: -2} == "gz" ]; then 
-        gunzip $f; 
-    fi; 
-donepython ../convert_data_to_np.py WISDM-v1
+python ../convert_data_to_np.py WISDM-v1
+
 cd ..
 pwd
