@@ -1,0 +1,4 @@
+pandas
+matplotlib dl-utils385
+hmmlearn umap-learn scikit-learn
+mpmath
