@@ -186,6 +186,26 @@ def make_wisdm_watch_dset_train_val(args,subj_ids):
     dset_val = StepDataset(x_val,y_val,device='cuda',window_size=args.window_size,step_size=args.step_size)
     return dset_train, dset_val, selected_acts
 
+def make_realdisp_dset_train_val(args,subj_ids):
+    activities_list = ['Walking','Jogging','Running','Jump up','Jump front & back','Jump sideways','Jump leg/arms open/closed','Jump rope','Trunk twist','Trunk twist','Waist bends forward','Waist rotation','Waist bends','Reach heels backwards','Lateral bend','Lateral bend with arm up','Repetitive forward stretching','Upper trunk and lower body opposite twist','Lateral elevation of arms','Frontal elevation of arms','Frontal hand claps','Frontal crossing of arms','Shoulders high-amplitude rotation','Shoulders low-amplitude rotation','Arms inner rotation','Knees','Heels','Knees bending','Knees','Rotation on the knees','Rowing','Elliptical bike','Cycling']
+    action_name_dict = {i+1:act for i,act in enumerate(activities_list)}
+    num_train_ids = len(subj_ids) - min(2,len(subj_ids)//2)
+    train_ids = subj_ids[:num_train_ids]
+    x_train = np.concatenate([np.load(f'datasets/realdisp/np_data/subject{s}.npy') for s in train_ids])
+    y_train = np.concatenate([np.load(f'datasets/realdisp/np_data/subject{s}_labels.npy') for s in train_ids])
+    x_train = x_train[:,2:] #First two columns are timestamp
+    x_train,y_train,selected_acts = preproc_xys(x_train,y_train,args.step_size,args.window_size,action_name_dict)
+    dset_train = StepDataset(x_train,y_train,device='cuda',window_size=args.window_size,step_size=args.step_size)
+    if len(subj_ids) <= 2: return dset_train, dset_train, selected_acts
+
+    # else make val dset
+    val_ids = subj_ids[num_train_ids:]
+    x_val = np.concatenate([np.load(f'datasets/realdisp/np_data/subject{s}.npy') for s in val_ids])
+    y_val = np.concatenate([np.load(f'datasets/realdisp/np_data/subject{s}_labels.npy') for s in val_ids])
+    x_val,y_val,selected_acts = preproc_xys(x_val,y_val,args.step_size,args.window_size,action_name_dict)
+    dset_val = StepDataset(x_val,y_val,device='cuda',window_size=args.window_size,step_size=args.step_size)
+    return dset_train, dset_val, selected_acts
+
 def make_capture_dset_train_val(args,subj_ids):
     action_name_dict = {0: 'sleep', 1: 'sedentary-screen', 2: 'tasks-moderate', 3: 'sedentary-non-screen', 4: 'walking', 5: 'vehicle', 6: 'bicycling', 7: 'tasks-light', 8: 'sports-continuous', 9: 'sport-interrupted'} # Should also be saved in json file in datasets/capture24
     num_train_ids = len(subj_ids) - min(2,len(subj_ids)//2)
@@ -214,6 +234,8 @@ def make_dset_train_val(args,subj_ids):
         return make_wisdm_v1_dset_train_val(args,subj_ids)
     if args.dset == 'WISDM-watch':
         return make_wisdm_watch_dset_train_val(args,subj_ids)
+    if args.dset == 'REALDISP':
+        return make_realdisp_dset_train_val(args,subj_ids)
     if args.dset == 'Capture24':
         return make_capture_dset_train_val(args,subj_ids)
 

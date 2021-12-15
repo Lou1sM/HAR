@@ -49,5 +49,12 @@ tar -xf WISDM_ar_latest.tar
 
 python ../convert_data_to_np.py WISDM-v1
 
+mkdir -p realdisp
+cd realdisp
+mkdir -p RawData
+wget https://archive.ics.uci.edu/ml/machine-learning-databases/00305/realistic_sensor_displacement.zip
+unzip realistic_sensor_displacement.zip
+cd ..
+python ../convert_data_to_np.py REALDISP
 cd ..
 pwd

@@ -3,7 +3,7 @@ import sys
 
 
 def get_cl_args():
-    dset_options = ['PAMAP','UCI','WISDM-v1','WISDM-watch','Capture24']
+    dset_options = ['PAMAP','UCI','WISDM-v1','WISDM-watch','REALDISP','Capture24']
     training_type_options = ['full','cluster_as_single','cluster_individually','train_frac_gts_as_single','find_similar_users']
     parser = argparse.ArgumentParser()
     group = parser.add_mutually_exclusive_group(required=False)
@@ -56,6 +56,8 @@ def get_cl_args():
         all_possible_ids = [str(x) for x in range(1,37)] #Paper says 29 users but ids go up to 36
     elif ARGS.dset == 'WISDM-watch':
         all_possible_ids = [str(x) for x in range(1600,1651)]
+    elif ARGS.dset == 'REALDISP':
+        all_possible_ids = [str(x) for x in range(1,18)]
     elif ARGS.dset == 'Capture24':
         all_possible_ids = [str(x) for x in range(1,20)]
     else: print(f"{ARGS.dset} is not a recognized dataset"); sys.exit()

@@ -4,6 +4,7 @@ from scipy import stats
 from mpmath import mp, mpf
 from dl_utils import misc, label_funcs
 import os
+from os.path import join
 import sys
 import numpy as np
 import pandas as pd
@@ -57,8 +58,8 @@ if __name__ == "__main__":
 
         for filename in os.listdir(data_dir):
             print(filename)
-            inpath = os.path.join(data_dir,filename)
-            outpath = os.path.join(np_dir,filename.split('.')[0])
+            inpath = join(data_dir,filename)
+            outpath = join(np_dir,filename.split('.')[0])
             convert(inpath,outpath)
 
     elif sys.argv[1] == 'UCI-raw':
@@ -68,7 +69,7 @@ if __name__ == "__main__":
         if not os.path.isdir(np_dir):
             os.makedirs(np_dir)
 
-        raw_label_array = array_from_txt(os.path.join(data_dir,'labels.txt')).astype(int)
+        raw_label_array = array_from_txt(join(data_dir,'labels.txt')).astype(int)
         def two_digitify(x): return '0'+str(x) if len(str(x))==1 else str(x)
         fnames = os.listdir(data_dir)
         for idx in range(1,31):
@@ -84,8 +85,8 @@ if __name__ == "__main__":
                 acc_exp_id = int(fna.split('exp')[1][:2])
                 gyro_exp_id = int(fng.split('exp')[1][:2])
                 assert acc_exp_id==gyro_exp_id
-                new_acc_array = array_from_txt(os.path.join(data_dir,fna))
-                new_gyro_array = array_from_txt(os.path.join(data_dir,fna))
+                new_acc_array = array_from_txt(join(data_dir,fna))
+                new_gyro_array = array_from_txt(join(data_dir,fna))
                 label_array_block = raw_label_array[raw_label_array[:,0]==acc_exp_id]
                 filled_label_array_block = expand_and_fill_labels(label_array_block,new_acc_array.shape[0])
                 assert filled_label_array_block.shape[0] == new_acc_array.shape[0]
@@ -98,9 +99,9 @@ if __name__ == "__main__":
             gyro_array = np.concatenate(gyro_array_list)
             total_array = np.concatenate((acc_array,gyro_array),axis=1)
             print(total_array.shape,label_array.shape)
-            outpath = os.path.join(np_dir,f'user{user_idx}.npy')
+            outpath = join(np_dir,f'user{user_idx}.npy')
             np.save(outpath,total_array)
-            label_outpath = os.path.join(np_dir,f'user{user_idx}_labels.npy')
+            label_outpath = join(np_dir,f'user{user_idx}_labels.npy')
             np.save(label_outpath,label_array)
 
     elif sys.argv[1] == 'UCI-pre':
@@ -163,10 +164,10 @@ if __name__ == "__main__":
 
         mp.dps = 100 # Avoid floating point errors in label insertion function
         for user_idx in range(1600,1651):
-            phone_acc_path = os.path.join(p_dir,'accel',f'data_{user_idx}_accel_phone.txt')
-            watch_acc_path = os.path.join(w_dir,'accel',f'data_{user_idx}_accel_watch.txt')
-            phone_gyro_path = os.path.join(p_dir,'gyro',f'data_{user_idx}_gyro_phone.txt')
-            watch_gyro_path = os.path.join(w_dir,'gyro',f'data_{user_idx}_gyro_watch.txt')
+            phone_acc_path = join(p_dir,'accel',f'data_{user_idx}_accel_phone.txt')
+            watch_acc_path = join(w_dir,'accel',f'data_{user_idx}_accel_watch.txt')
+            phone_gyro_path = join(p_dir,'gyro',f'data_{user_idx}_gyro_phone.txt')
+            watch_gyro_path = join(w_dir,'gyro',f'data_{user_idx}_gyro_watch.txt')
 
             label_codes_list = list('ABCDEFGHIJKLMOPQRS') # Missin 'N' is deliberate
             def two_arrays_from_txt(inpath):
@@ -199,6 +200,23 @@ if __name__ == "__main__":
             user_certains_fn = f'{user_idx}_certains.npy'
             misc.np_save(certains,np_dir,user_certains_fn)
 
+    elif sys.argv[1] == 'REALDISP':
+        data_dir = 'realdisp/RawData'
+        np_dir = 'realdisp/np_data'
+        print("\n#####Preprocessing REALDISP#####\n")
+        if not os.path.isdir(np_dir):
+            os.makedirs(np_dir)
+
+        for filename in os.listdir(data_dir):
+            if not filename.split('_')[1].startswith('ideal'):
+                continue
+            with open(join(data_dir,filename)) as f: xy = f.readlines()
+            ar = np.array([[float(item) for item in line.split('\t')] for line in xy])
+            x = ar[:,:-1]
+            y = ar[:,-1].astype(int)
+
+            np.save(join(np_dir,filename.split('_')[0]), x)
+            np.save(join(np_dir,filename.split('_')[0])+'_labels', y)
     elif sys.argv[1] == 'Capture24':
         np_dir = 'capture24/np_data'
         if not os.path.isdir(np_dir):
@@ -216,12 +234,12 @@ if __name__ == "__main__":
             subj_id = fname.split('.')[0]
             if not subj_id.startswith('P') and not len(subj_id) == 4: continue # Skip metadata files
             print(f"converting {fname} to np")
-            try: df = pd.read_csv(os.path.join('capture24',fname))
+            try: df = pd.read_csv(join('capture24',fname))
             except: set_trace()
             translated_df = df.merge(name_df)
             x = translated_df[['x','y','z']].to_numpy()
             y = translated_df['int_label'].to_numpy()
-            np.save(os.path.join(np_dir,f'{subj_id}.npy'),x)
-            np.save(os.path.join(np_dir,f'{subj_id}_labels.npy'),y)
+            np.save(join(np_dir,f'{subj_id}.npy'),x)
+            np.save(join(np_dir,f'{subj_id}_labels.npy'),y)
 
     else: print('\nIncorrect or no dataset specified\n')
