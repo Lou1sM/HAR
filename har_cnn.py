@@ -118,8 +118,6 @@ class HARLearner():
         self.enc.train()
         self.mlp.train()
         if lf is None: lf = self.pseudo_label_lf
-        best_acc = 0
-        best_f1 = 0
         best_pred_array_ordered = -np.ones(len(dset.y))
         sampler = data.RandomSampler(dset) if custom_sampler is 'none' else custom_sampler
         dl = data.DataLoader(dset,batch_sampler=data.BatchSampler(sampler,self.batch_size,drop_last=False),pin_memory=False)
@@ -127,7 +125,6 @@ class HARLearner():
         for epoch in range(num_epochs):
             pred_list = []
             idx_list = []
-            conf_list = []
             best_f1 = 0
             for batch_idx, (xb,yb,idx) in enumerate(dl):
                 latent = self.enc(xb)
@@ -145,32 +142,14 @@ class HARLearner():
                 if rlmbda>0: self.dec_opt.step(); self.dec_opt.zero_grad()
                 conf,pred = label_pred.max(axis=1)
                 pred_list.append(numpyify(pred))
-                conf_list.append(numpyify(conf))
                 idx_list.append(idx.detach().cpu().numpy())
                 if ARGS.test: break
             if ARGS.test:
-                return -1, -1, dummy_labels(self.num_classes,len(dset.y)), np.ones(len(dset))
+                return dummy_labels(self.num_classes,len(dset.y))
             pred_array = np.concatenate(pred_list)
             idx_array = np.concatenate(idx_list)
-            conf_array = np.concatenate(conf_list)
             pred_array_ordered = np.array([item[0] for item in sorted(zip(pred_array,idx_array),key=lambda x:x[1])])
-            conf_array_ordered = np.array([item[0] for item in sorted(zip(conf_array,idx_array),key=lambda x:x[1])])
-            if compute_acc:
-                try:
-                    acc = -1 if ARGS.test else accuracy(pred_array_ordered,dset.y.detach().cpu().numpy())
-                    f1 = -1 if ARGS.test else mean_f1(pred_array_ordered,dset.y.detach().cpu().numpy())
-                except: set_trace()
-                if ARGS.verbose:
-                    print(acc)
-                    if is_mask:
-                        m = numpyify(multiplicative_mask.bool())
-                        print(accuracy(pred_array_ordered[m],dset.y.detach().cpu().numpy()[m]))
-                if ARGS.test or acc > best_acc:
-                    best_pred_array_ordered = pred_array_ordered
-                    best_conf_array_ordered = conf_array_ordered
-                    best_acc = acc
-                    best_f1 = f1
-        return best_acc,best_f1,best_pred_array_ordered,best_conf_array_ordered
+        return pred_array_ordered
 
     def train_with_fract_gts_on(self,dset,num_epochs,frac_gt_labels,reinit=False,rlmbda=0):
         gt_mask = stratified_sample_mask(len(dset),frac_gt_labels)
@@ -219,7 +198,6 @@ class HARLearner():
         np_gt_labels = dset.y.detach().cpu().numpy().astype(int)
         super_mask = np.ones(len(dset)).astype(np.bool)
         mlp_accs = []
-        cluster_accs = []
         for epoch_num in range(num_meta_epochs):
             if ARGS.test:
                 num_tiles = len(dset.y)//self.num_classes
@@ -256,15 +234,11 @@ class HARLearner():
                 assert (new_pred_labels[mask]==old_pred_labels[mask]).all()
             super_mask*=mask
             mask_to_use = (mask+super_mask)/2
-            mlp_acc,mlp_f1,mlp_preds,mlp_confs = self.train_on(pseudo_label_dset,multiplicative_mask=cudify(mask_to_use),num_epochs=num_pseudo_label_epochs)
-            cluster_acc = accuracy(new_pred_labels,np_gt_labels)
-            cluster_accs.append(cluster_acc)
-            mlp_accs.append(mlp_acc)
+            mlp_preds = self.train_on(pseudo_label_dset,multiplicative_mask=cudify(mask_to_use),num_epochs=num_pseudo_label_epochs)
             y_np = numpyify(dset.y)
             if ARGS.verbose:
                 print('Meta Epoch:', epoch_num)
                 print('Super Masked Counts:',label_counts(y_np[super_mask]))
-                print('Latent accuracy:', cluster_acc)
                 print('Masked latent accuracy:', accuracy(new_pred_labels[mask],y_np[mask]),mask.sum())
                 print('Super Masked latent accuracy:', accuracy(new_pred_labels[super_mask],dset.y[super_mask]),super_mask.sum())
                 print('MLP accuracy:', accuracy(mlp_preds,np_gt_labels))
@@ -274,7 +248,7 @@ class HARLearner():
                 print(f"Latent: {accuracy(new_pred_labels,np_gt_labels)}\tMaskL: {accuracy(new_pred_labels[mask],y_np[mask]),mask.sum()}\tSuperMaskL{accuracy(new_pred_labels[super_mask],dset.y[super_mask]),super_mask.sum()}")
             old_pred_labels = deepcopy(new_pred_labels)
         super_super_mask = np.logical_and(super_mask,new_pred_labels==mlp_preds)
-        return new_pred_labels, mask, super_mask, super_super_mask, mlp_accs, cluster_accs
+        return new_pred_labels, mask, super_mask, super_super_mask
 
     def pseudo_label_cluster_meta_meta_loop(self,dset,num_meta_meta_epochs,num_meta_epochs,num_pseudo_label_epochs,prob_thresh,selected_acts):
         y_np = numpyify(dset.y)
@@ -290,7 +264,7 @@ class HARLearner():
         for meta_meta_epoch in range(num_meta_meta_epochs):
             print('\nMETA META EPOCH:', meta_meta_epoch)
             meta_pivot_pred_labels = best_preds_so_far if meta_meta_epoch > 0 else 'none'
-            preds, mask, super_mask, super_super_mask, mlp_accs, cluster_accs = self.pseudo_label_cluster_meta_loop(dset,meta_pivot_pred_labels, num_meta_epochs=num_meta_epochs,num_pseudo_label_epochs=num_pseudo_label_epochs,prob_thresh=prob_thresh,selected_acts=selected_acts)
+            preds, mask, super_mask, super_super_mask = self.pseudo_label_cluster_meta_loop(dset,meta_pivot_pred_labels, num_meta_epochs=num_meta_epochs,num_pseudo_label_epochs=num_pseudo_label_epochs,prob_thresh=prob_thresh,selected_acts=selected_acts)
             preds_histories.append(preds)
             super_mask_histories.append(super_mask)
             super_super_mask_histories.append(super_super_mask)
@@ -363,6 +337,8 @@ class HARLearner():
         mlp_self_preds = [debabled_mega_ultra_preds[uid][start_idxs[uid]:start_idxs[uid+1]] for uid in range(len(user_dsets))]
         hmm_self_preds = [translate_labellings(sa,ta) for sa,ta in zip(self_preds,mlp_self_preds)]
 
+        check_dir(f'experiments/{args.exp_name}')
+        np.save(f'experiments/{args.exp_name}/debabled_mega_ultra_preds',debabled_mega_ultra_preds)
         mlp_accs = [accuracy(p,numpyify(d.y)) for p,(d,sa) in zip(mlp_self_preds,user_dsets)]
         mlp_f1s = [mean_f1(p,numpyify(d.y)) for p,(d,sa) in zip(mlp_self_preds,user_dsets)]
         mlp_aris = [rari(p,numpyify(d.y)) for p,(d,sa) in zip(mlp_self_preds,user_dsets)]
@@ -372,8 +348,6 @@ class HARLearner():
         hmm_aris = [rari(p,numpyify(d.y)) for p,(d,sa) in zip(hmm_self_preds,user_dsets)]
         hmm_nmis = [rnmi(p,numpyify(d.y)) for p,(d,sa) in zip(hmm_self_preds,user_dsets)]
         total_num_dpoints = sum(len(ud) for ud,sa in user_dsets)
-        check_dir(f'experiments/{args.exp_name}')
-        np.save(f'experiments/{args.exp_name}/debabled_mega_ultra_preds',debabled_mega_ultra_preds)
         with open(f'experiments/{args.exp_name}/results.txt','w') as f:
             for n,acc_list in zip(('self','best_self','mlp','hmm'),(self_accs,self_best_accs,mlp_accs,hmm_accs)):
                 avg_acc = sum([a*len(ud) for a, (ud, sa) in zip(acc_list, user_dsets)])/total_num_dpoints
