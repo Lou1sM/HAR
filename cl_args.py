@@ -1,5 +1,6 @@
 import argparse
 import sys
+import project_config
 
 
 def get_cl_args():
@@ -38,30 +39,8 @@ def get_cl_args():
     ARGS = parser.parse_args()
 
     need_umap = False
-    if ARGS.test:
-        ARGS.num_meta_epochs = 1
-        ARGS.num_meta_meta_epochs = 1
-        ARGS.num_cluster_epochs = 1
-        ARGS.num_pseudo_label_epochs = 1
-    elif not ARGS.no_umap and not ARGS.show_shapes: need_umap = True
-    if ARGS.short_epochs:
-        ARGS.num_meta_epochs = 1
-        ARGS.num_cluster_epochs = 1
-        ARGS.num_pseudo_label_epochs = 1
-    if ARGS.dset == 'PAMAP':
-        all_possible_ids = [str(x) for x in range(101,110)]
-    elif ARGS.dset == 'UCI':
-        def two_digitify(x): return '0' + str(x) if len(str(x))==1 else str(x)
-        all_possible_ids = [two_digitify(x) for x in range(1,30)]
-    elif ARGS.dset == 'WISDM-v1':
-        all_possible_ids = [str(x) for x in range(1,37)] #Paper says 29 users but ids go up to 36
-    elif ARGS.dset == 'WISDM-watch':
-        all_possible_ids = [str(x) for x in range(1600,1651)]
-    elif ARGS.dset == 'REALDISP':
-        all_possible_ids = [str(x) for x in range(1,18)]
-    elif ARGS.dset == 'Capture24':
-        all_possible_ids = [str(x) for x in range(1,20)]
-    else: print(f"{ARGS.dset} is not a recognized dataset"); sys.exit()
+    dset_info_object = project_config.get_dataset_info_object(ARGS.dset)
+    all_possible_ids = dset_info_object.possible_subj_ids
     if ARGS.all_subjs: ARGS.subj_ids=all_possible_ids
     elif ARGS.num_subjs is not None: ARGS.subj_ids = all_possible_ids[:ARGS.num_subjs]
     elif ARGS.subj_ids == ['first']: ARGS.subj_ids = all_possible_ids[:1]

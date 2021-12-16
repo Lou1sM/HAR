@@ -13,8 +13,9 @@ import cl_args
 from dl_utils.misc import asMinutes,check_dir
 from dl_utils.label_funcs import accuracy, mean_f1, debable, translate_labellings, get_num_labels, label_counts, dummy_labels, avoid_minus_ones_lf_wrapper,masked_mode,acc_by_label
 from dl_utils.tensor_funcs import noiseify, numpyify, cudify
-from make_dsets import make_dset_train_val, make_dsets_by_user
+from make_dsets import make_single_dset, make_dsets_by_user
 from sklearn.metrics import normalized_mutual_info_score,adjusted_rand_score
+from project_config import get_dataset_info_object
 
 rari = lambda x,y: round(adjusted_rand_score(x,y),4)
 rnmi = lambda x,y: round(normalized_mutual_info_score(x,y),4)
@@ -90,17 +91,15 @@ class Var_BS_MLP(nn.Module):
         return x
 
 class HARLearner():
-    def __init__(self,enc,mlp,dec,batch_size,num_classes):
+    def __init__(self,enc,mlp,batch_size,num_classes):
         self.batch_size = batch_size
         self.num_classes = num_classes
         self.enc = enc
-        self.dec = dec
         self.mlp = mlp
         self.pseudo_label_lf = avoid_minus_ones_lf_wrapper(nn.CrossEntropyLoss(reduction='none'))
         self.rec_lf = nn.MSELoss(reduction='none')
 
         self.enc_opt = torch.optim.Adam(self.enc.parameters(),lr=ARGS.enc_lr)
-        self.dec_opt = torch.optim.Adam(self.dec.parameters(),lr=ARGS.dec_lr)
         self.mlp_opt = torch.optim.Adam(self.mlp.parameters(),lr=ARGS.mlp_lr)
 
     def get_latents(self,dset):
@@ -117,7 +116,6 @@ class HARLearner():
     def train_on(self,dset,num_epochs,multiplicative_mask='none',lf=None,compute_acc=True,reinit=True,rlmbda=0,custom_sampler='none',noise=0.):
         if reinit: self.reinit_nets()
         self.enc.train()
-        self.dec.train()
         self.mlp.train()
         if lf is None: lf = self.pseudo_label_lf
         best_acc = 0
@@ -132,7 +130,6 @@ class HARLearner():
             conf_list = []
             best_f1 = 0
             for batch_idx, (xb,yb,idx) in enumerate(dl):
-                #if len(xb) == 1: continue # If last batch is only one element then batchnorm will error
                 latent = self.enc(xb)
                 if noise > 0: latent = noiseify(latent,noise)
                 label_pred = self.mlp(latent) if latent.ndim == 2 else self.mlp(latent.squeeze(2).squeeze(2))
@@ -185,41 +182,25 @@ class HARLearner():
 
     def val_on(self,dset,test):
         self.enc.eval()
-        self.dec.eval()
         self.mlp.eval()
         pred_list = []
         idx_list = []
-        #dl = data.DataLoader(dset,batch_sampler=data.BatchSampler(data.SequentialSampler(dset),self.batch_size,drop_last=False),pin_memory=False)
-        bs = min(8192,len(dset))
+        bs = min(len(dset), int(8192*12/dset.x.shape[-1]))
         dl = data.DataLoader(dset,batch_sampler=data.BatchSampler(data.SequentialSampler(dset),bs,drop_last=False),pin_memory=False)
         print(len(dset))
         for batch_idx, (xb,yb,idx) in enumerate(dl):
             latent = self.enc(xb)
             label_pred = self.mlp(latent) if latent.ndim == 2 else self.mlp(latent[:,:,0,0])
             pred_list.append(label_pred.argmax(axis=1).detach().cpu().numpy())
-            #idx_list.append(idx.detach().cpu().numpy())
             if ARGS.test: break
         pred_array = np.concatenate(pred_list)
         if test:
-            return -1, -1, dummy_labels(self.num_classes,len(dset.y))
-        #idx_array = np.concatenate(idx_list)
-        #print(idx_array)
-        #pred_array_ordered = np.array([item[0] for item in sorted(zip(pred_array,idx_array),key=lambda x:x[1])])
-        #if get_num_labels(dset.y) == 1: set_trace()
-        #acc = -1 if ARGS.test else accuracy(pred_array_ordered,dset.y.detach().cpu().numpy())
-        #f1 = -1 if ARGS.test else mean_f1(pred_array_ordered,dset.y.detach().cpu().numpy())
+            return dummy_labels(self.num_classes,len(dset.y))
         return pred_array
 
     def reinit_nets(self):
         for m in self.enc.modules():
             if isinstance(m,nn.Conv2d):
-                torch.nn.init.xavier_uniform(m.weight.data)
-                torch.nn.init.zeros_(m.bias.data)
-            elif isinstance(m,nn.BatchNorm2d):
-                torch.nn.init.ones_(m.weight.data)
-                torch.nn.init.zeros_(m.bias.data)
-        for m in self.dec.modules():
-            if isinstance(m,nn.ConvTranspose2d):
                 torch.nn.init.xavier_uniform(m.weight.data)
                 torch.nn.init.zeros_(m.bias.data)
             elif isinstance(m,nn.BatchNorm2d):
@@ -373,9 +354,7 @@ class HARLearner():
                 preds = self.val_on(other_user_dset,test=ARGS.test)
                 preds_from_this_user.append(preds)
             preds_from_users_list.append(np.concatenate(preds_from_this_user))
-            print([round(a,4) for a in self_accs])
             total_align_time += time.time() - align_start_time
-            print(total_align_time,time.time() - align_start_time,time.time(),align_start_time)
         if ARGS.just_align_time:
             print(f'Total align time: {total_align_time}'); sys.exit()
         mega_ultra_preds = np.stack(preds_from_users_list)
@@ -433,7 +412,6 @@ class HARLearner():
                 f.write(f"\n{relevant_arg}: {vars(ARGS).get(relevant_arg)}")
             train_end_time = time.time()
             total_train_time = asMinutes(train_end_time-train_start_time)
-            set_trace()
             f.write(f'Total align time: {total_align_time}')
             f.write(f'Total train time: {total_train_time}')
             cross_accs = np.array([[accuracy(debabled_mega_ultra_preds[pred_id][start_idxs[target_id]:start_idxs[target_id+1]],numpyify(user_dsets[target_id][0].y)) for target_id in range(len(user_dsets))] for pred_id in range(len(user_dsets))])
@@ -482,98 +460,34 @@ def stratified_sample_mask(population_length, sample_frac):
 
 def main(args):
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
-    if args.dset == 'PAMAP':
-        x_filters = (50,40,7,4)
-        y_filters = (1,1,1,39)
-        x_strides = (2,2,1,1)
-        y_strides = (1,1,1,1)
-        max_pools = ((2,1),(2,1),(2,1),(2,1))
-        x_filters_trans = (45,35,10,6)
-        y_filters_trans = (18,18,6,5)
-        x_strides_trans = (1,2,2,2)
-        y_strides_trans = (1,1,2,1)
-        true_num_classes = 12
-    elif args.dset == 'UCI':
-        x_filters = (60,40,4,4)
-        x_strides = (2,2,1,1)
-        y_filters = (1,1,1,6)
-        y_strides = (1,1,1,1)
-        max_pools = ((2,1),(3,1),(2,1),1)
-        x_filters_trans = (30,30,20,10)
-        x_strides_trans = (1,3,2,2)
-        y_filters_trans = (3,3,3,4)
-        y_strides_trans = (1,2,1,1)
-        true_num_classes = 6
-    elif args.dset == 'WISDM-v1':
-        x_filters = (50,40,5,4)
-        x_strides = (2,2,1,1)
-        y_filters = (1,1,1,3)
-        y_strides = (1,1,1,1)
-        max_pools = ((2,1),(3,1),(2,1),1)
-        x_filters_trans = (30,30,20,10)
-        x_strides_trans = (1,3,2,2)
-        y_filters_trans = (2,2,2,2)
-        y_strides_trans = (2,2,1,1)
-        true_num_classes = 5
-    elif args.dset == 'WISDM-watch':
-        x_filters = (50,40,8,6)
-        y_filters = (2,2,2,2)
-        x_strides = (2,2,1,1)
-        y_strides = (2,2,1,1)
-        max_pools = ((2,1),(3,1),1,1)
-        x_filters_trans = (31,30,14,10)
-        y_filters_trans = (2,2,2,2)
-        x_strides_trans = (1,3,2,2)
-        y_strides_trans = (1,1,2,2)
-        true_num_classes = 17
-    elif args.dset == 'REALDISP':
-        x_filters = (50,40,8,6)
-        y_filters = (1,1,1,117)
-        x_strides = (2,2,1,1)
-        y_strides = (1,1,1,1)
-        max_pools = ((2,1),(3,1),1,1)
-        x_filters_trans = (31,30,14,10)
-        y_filters_trans = (2,2,2,2)
-        x_strides_trans = (1,3,2,2)
-        y_strides_trans = (1,1,2,2)
-        true_num_classes = 33
-    elif args.dset == 'Capture24':
-        x_filters = (50,40,5,4)
-        y_filters = (1,1,2,2)
-        x_strides = (2,2,1,1)
-        y_strides = (1,1,1,1)
-        max_pools = ((2,1),(3,1),(2,1),1)
-        x_filters_trans = (30,30,20,10)
-        y_filters_trans = (2,2,1,1)
-        x_strides_trans = (1,3,2,2)
-        y_strides_trans = (1,1,1,1)
-        true_num_classes = 10
-    num_classes = args.num_classes if args.num_classes != -1 else true_num_classes
+    dset_info_object = get_dataset_info_object(args.dset)
+    x_filters = (50,40,7,4)
+    y_filters = (1,1,1,dset_info_object.num_channels)
+    x_strides = (2,2,1,1)
+    y_strides = (1,1,1,1)
+    max_pools = ((2,1),(2,1),(2,1),(2,1))
+    num_classes = args.num_classes if args.num_classes != -1 else dset_info_object.num_classes
     enc = EncByLayer(x_filters,y_filters,x_strides,y_strides,max_pools,show_shapes=args.show_shapes)
-    dec = DecByLayer(x_filters_trans,y_filters_trans,x_strides_trans,y_strides_trans,show_shapes=args.show_shapes)
     mlp = Var_BS_MLP(32,256,num_classes)
     if args.load_pretrained:
         enc.load_state_dict(torch.load('enc_pretrained.pt'))
-        mlp.load_state_dict(torch.load('dec_pretrained.pt'))
     enc.cuda()
-    dec.cuda()
     mlp.cuda()
     subj_ids = args.subj_ids
-    dset_train, dset_val, selected_acts = make_dset_train_val(args,subj_ids)
+    dset_train, selected_acts = make_single_dset(args,subj_ids)
     if args.show_shapes:
         num_ftrs = dset_train.x.shape[-1]
         print(num_ftrs)
         lat = enc(torch.ones((2,1,512,num_ftrs),device='cuda'))
-        dec(lat)
         sys.exit()
 
-    har = HARLearner(enc=enc,mlp=mlp,dec=dec,batch_size=args.batch_size,num_classes=num_classes)
+    har = HARLearner(enc=enc,mlp=mlp,batch_size=args.batch_size,num_classes=num_classes)
 
     dsets_by_id = make_dsets_by_user(args,subj_ids)
     bad_ids = []
     for user_id, (dset,sa) in dsets_by_id.items():
         n = get_num_labels(dset.y)
-        if n < true_num_classes/2:
+        if n < dset_info_object.num_classes/2:
             print(f"Excluding user {user_id}, only has {n} different labels, instead of {num_classes}")
             bad_ids.append(user_id)
     dsets_by_id = {k:v for k,v in dsets_by_id.items() if k not in bad_ids}
