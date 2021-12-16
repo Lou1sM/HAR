@@ -182,28 +182,33 @@ class HARLearner():
         if abs(approx - frac_gt_labels) > .01:
             print(f"frac_gts approximation is {approx}, instead of {frac_gt_labels}")
         return self.train_on(dset,num_epochs,gt_mask,reinit=reinit,rlmbda=rlmbda)
-    def val_on(self,dset):
+
+    def val_on(self,dset,test):
         self.enc.eval()
         self.dec.eval()
         self.mlp.eval()
         pred_list = []
         idx_list = []
-        dl = data.DataLoader(dset,batch_sampler=data.BatchSampler(data.RandomSampler(dset),self.batch_size,drop_last=False),pin_memory=False)
+        #dl = data.DataLoader(dset,batch_sampler=data.BatchSampler(data.SequentialSampler(dset),self.batch_size,drop_last=False),pin_memory=False)
+        bs = min(8192,len(dset))
+        dl = data.DataLoader(dset,batch_sampler=data.BatchSampler(data.SequentialSampler(dset),bs,drop_last=False),pin_memory=False)
+        print(len(dset))
         for batch_idx, (xb,yb,idx) in enumerate(dl):
             latent = self.enc(xb)
             label_pred = self.mlp(latent) if latent.ndim == 2 else self.mlp(latent[:,:,0,0])
             pred_list.append(label_pred.argmax(axis=1).detach().cpu().numpy())
-            idx_list.append(idx.detach().cpu().numpy())
+            #idx_list.append(idx.detach().cpu().numpy())
             if ARGS.test: break
         pred_array = np.concatenate(pred_list)
-        if ARGS.test:
+        if test:
             return -1, -1, dummy_labels(self.num_classes,len(dset.y))
-        idx_array = np.concatenate(idx_list)
-        pred_array_ordered = np.array([item[0] for item in sorted(zip(pred_array,idx_array),key=lambda x:x[1])])
-        if get_num_labels(dset.y) == 1: set_trace()
-        acc = -1 if ARGS.test else accuracy(pred_array_ordered,dset.y.detach().cpu().numpy())
-        f1 = -1 if ARGS.test else mean_f1(pred_array_ordered,dset.y.detach().cpu().numpy())
-        return acc,f1,pred_array_ordered
+        #idx_array = np.concatenate(idx_list)
+        #print(idx_array)
+        #pred_array_ordered = np.array([item[0] for item in sorted(zip(pred_array,idx_array),key=lambda x:x[1])])
+        #if get_num_labels(dset.y) == 1: set_trace()
+        #acc = -1 if ARGS.test else accuracy(pred_array_ordered,dset.y.detach().cpu().numpy())
+        #f1 = -1 if ARGS.test else mean_f1(pred_array_ordered,dset.y.detach().cpu().numpy())
+        return pred_array
 
     def reinit_nets(self):
         for m in self.enc.modules():
@@ -350,27 +355,29 @@ class HARLearner():
         for user_id, (user_dset, sa) in user_dsets_as_dict.items():
             preds_from_this_user = []
             accs_from_this_user = []
-            print(f"training on {user_id}")
-            best_preds,preds = self.pseudo_label_cluster_meta_meta_loop(user_dset,num_meta_meta_epochs=args.num_meta_meta_epochs,num_meta_epochs=args.num_meta_epochs,num_pseudo_label_epochs=args.num_pseudo_label_epochs,prob_thresh=args.prob_thresh,selected_acts=sa)
-            self_accs.append(accuracy(preds,numpyify(user_dset.y)))
-            self_best_accs.append(accuracy(best_preds,numpyify(user_dset.y)))
-            self_f1s.append(mean_f1(preds,numpyify(user_dset.y)))
-            self_best_f1s.append(mean_f1(best_preds,numpyify(user_dset.y)))
-            self_aris.append(rari(preds,numpyify(user_dset.y)))
-            self_best_aris.append(rari(best_preds,numpyify(user_dset.y)))
-            self_nmis.append(rnmi(preds,numpyify(user_dset.y)))
-            self_best_nmis.append(rnmi(best_preds,numpyify(user_dset.y)))
-            self_preds.append(preds)
-            self_best_preds.append(best_preds)
+            if not ARGS.just_align_time:
+                print(f"training on {user_id}")
+                best_preds,preds = self.pseudo_label_cluster_meta_meta_loop(user_dset,num_meta_meta_epochs=args.num_meta_meta_epochs,num_meta_epochs=args.num_meta_epochs,num_pseudo_label_epochs=args.num_pseudo_label_epochs,prob_thresh=args.prob_thresh,selected_acts=sa)
+                self_accs.append(accuracy(preds,numpyify(user_dset.y)))
+                self_best_accs.append(accuracy(best_preds,numpyify(user_dset.y)))
+                self_f1s.append(mean_f1(preds,numpyify(user_dset.y)))
+                self_best_f1s.append(mean_f1(best_preds,numpyify(user_dset.y)))
+                self_aris.append(rari(preds,numpyify(user_dset.y)))
+                self_best_aris.append(rari(best_preds,numpyify(user_dset.y)))
+                self_nmis.append(rnmi(preds,numpyify(user_dset.y)))
+                self_best_nmis.append(rnmi(best_preds,numpyify(user_dset.y)))
+                self_preds.append(preds)
+                self_best_preds.append(best_preds)
             align_start_time = time.time()
             for other_user_id, (other_user_dset, sa) in user_dsets_as_dict.items():
-                acc,f1,preds = self.val_on(other_user_dset)
-                accs_from_this_user.append(acc)
+                preds = self.val_on(other_user_dset,test=ARGS.test)
                 preds_from_this_user.append(preds)
             preds_from_users_list.append(np.concatenate(preds_from_this_user))
-            accs_from_users_list.append(accs_from_this_user)
             print([round(a,4) for a in self_accs])
             total_align_time += time.time() - align_start_time
+            print(total_align_time,time.time() - align_start_time,time.time(),align_start_time)
+        if ARGS.just_align_time:
+            print(f'Total align time: {total_align_time}'); sys.exit()
         mega_ultra_preds = np.stack(preds_from_users_list)
         debabled_mega_ultra_preds = debable(mega_ultra_preds,'none')
         start_idxs = [sum([len(d) for d,sa in user_dsets[:i]]) for i in range(len(user_dsets)+1)]
@@ -426,7 +433,7 @@ class HARLearner():
                 f.write(f"\n{relevant_arg}: {vars(ARGS).get(relevant_arg)}")
             train_end_time = time.time()
             total_train_time = asMinutes(train_end_time-train_start_time)
-            total_align_time = asMinutes(total_align_time)
+            set_trace()
             f.write(f'Total align time: {total_align_time}')
             f.write(f'Total train time: {total_train_time}')
             cross_accs = np.array([[accuracy(debabled_mega_ultra_preds[pred_id][start_idxs[target_id]:start_idxs[target_id+1]],numpyify(user_dsets[target_id][0].y)) for target_id in range(len(user_dsets))] for pred_id in range(len(user_dsets))])
@@ -435,6 +442,8 @@ class HARLearner():
             f.write(f'Mean cross acc: {mean_off_diagonal(cross_accs)}')
             f.write(f'Mean cross ari: {mean_off_diagonal(cross_aris)}')
             f.write(f'Mean cross nmi: {mean_off_diagonal(cross_nmis)}')
+            f.write(f'Total align time: {total_align_time}')
+            f.write(f'Total train time: {total_train_time}')
         np.save(f'experiments/{args.exp_name}/debabled_mega_ultra_preds',debabled_mega_ultra_preds)
         np.save(f'experiments/{args.exp_name}/cross_accs',cross_accs)
         np.save(f'experiments/{args.exp_name}/cross_aris',cross_aris)
@@ -449,6 +458,9 @@ class HARLearner():
         np.save(f'experiments/{args.exp_name}/self_best_nmis',self_best_nmis)
         print(f'Total align time: {total_align_time}')
         print(f'Total train time: {total_train_time}')
+        if ARGS.all_subjs:
+            dset_name_dir_dict = {'PAMAP': 'PAMAP2_Dataset', 'REALDISP': 'realdisp', 'UCI': 'UCI2', 'WISDM-v1': 'wisdm_v1', 'WISDM-watch': 'wisdm-dataset'}
+            np.save(f'datasets/{dset_name_dir_dict[ARGS.dset]}/full_ygt',np.concatenate([numpyify(d.y) for d,sa in user_dsets]))
 
 def mean_off_diagonal(mat):
     upper_sum = np.triu(mat,1).sum()

@@ -17,6 +17,7 @@ def get_cl_args():
     parser.add_argument('--exp_name',type=str,default="try")
     parser.add_argument('--frac_gt_labels',type=float,default=0.1)
     parser.add_argument('--gpu',type=str,default='0')
+    parser.add_argument('--just_align_time',action='store_true')
     parser.add_argument('--load_pretrained',action='store_true')
     parser.add_argument('--mlp_lr',type=float,default=1e-3)
     parser.add_argument('--no_umap',action='store_true')
