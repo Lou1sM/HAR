@@ -98,6 +98,9 @@ class HARLearner():
         self.mlp = mlp
         self.pseudo_label_lf = avoid_minus_ones_lf_wrapper(nn.CrossEntropyLoss(reduction='none'))
         self.rec_lf = nn.MSELoss(reduction='none')
+        self.total_train_time = 0
+        self.total_umap_time = 0
+        self.total_cluster_time = 0
 
         self.enc_opt = torch.optim.Adam(self.enc.parameters(),lr=ARGS.enc_lr)
         self.mlp_opt = torch.optim.Adam(self.mlp.parameters(),lr=ARGS.mlp_lr)
@@ -117,6 +120,7 @@ class HARLearner():
         if reinit: self.reinit_nets()
         self.enc.train()
         self.mlp.train()
+        start_time = time.time()
         if lf is None: lf = self.pseudo_label_lf
         best_pred_array_ordered = -np.ones(len(dset.y))
         sampler = data.RandomSampler(dset) if custom_sampler is 'none' else custom_sampler
@@ -149,6 +153,7 @@ class HARLearner():
             pred_array = np.concatenate(pred_list)
             idx_array = np.concatenate(idx_list)
             pred_array_ordered = np.array([item[0] for item in sorted(zip(pred_array,idx_array),key=lambda x:x[1])])
+        self.total_train_time += time.time() - start_time
         return pred_array_ordered
 
     def train_with_fract_gts_on(self,dset,num_epochs,frac_gt_labels,reinit=False,rlmbda=0):
@@ -210,7 +215,10 @@ class HARLearner():
                 old_pred_labels = new_pred_labels
             else:
                 latents = self.get_latents(dset)
+                start_time = time.time()
                 umapped_latents = latents if ARGS.no_umap else umap.UMAP(min_dist=0,n_neighbors=60,n_components=2,random_state=42).fit_transform(latents.squeeze())
+                self.total_umap_time += time.time() - start_time
+                start_time = time.time()
                 model = hmm.GaussianHMM(self.num_classes,'full')
                 model.params = 'mc'
                 model.init_params = 'mc'
@@ -221,6 +229,7 @@ class HARLearner():
                 model.fit(umapped_latents)
                 new_pred_labels = model.predict(umapped_latents)
                 new_pred_probs = model.predict_proba(umapped_latents)
+                self.total_cluster_time += time.time() - start_time
                 mask = new_pred_probs.max(axis=1) >= prob_thresh
                 if meta_pivot_pred_labels is not 'none':
                     new_pred_labels = translate_labellings(new_pred_labels,meta_pivot_pred_labels,subsample_size=30000)
@@ -282,17 +291,18 @@ class HARLearner():
             best_preds_so_far[got_by_super_super_masks] = super_super_mask_mode_preds[got_by_super_super_masks]
             assert not (best_preds_so_far==-1).any()
             best_acc = accuracy(best_preds_so_far,y_np)
-            best_nmi = normalized_mutual_info_score(best_preds_so_far,y_np)
-            best_rand_idx = adjusted_rand_score(best_preds_so_far,y_np)
-            print('Results of best so far',best_acc,best_nmi,best_rand_idx)
+            best_nmi = rnmi(best_preds_so_far,y_np)
+            best_ari = rari(best_preds_so_far,y_np)
+            best_f1 = mean_f1(best_preds_so_far,y_np)
+            print('Results of best so far',best_acc,best_nmi,best_ari,best_f1)
 
         surely_correct = np.stack(super_mask_histories).all(axis=0)
         macc = lambda mask: accuracy(best_preds_so_far[mask],y_np[mask])
 
-        return best_preds_so_far,preds
+        return best_preds_so_far,preds,best_acc,best_nmi,best_ari,best_f1
 
     def full_train(self,user_dsets_as_dict,args):
-        train_start_time = time.time()
+        total_start_time = time.time()
         preds_from_users_list = []
         accs_from_users_list = []
         self_accs = []
@@ -312,17 +322,18 @@ class HARLearner():
             accs_from_this_user = []
             if not ARGS.just_align_time:
                 print(f"training on {user_id}")
-                best_preds,preds = self.pseudo_label_cluster_meta_meta_loop(user_dset,num_meta_meta_epochs=args.num_meta_meta_epochs,num_meta_epochs=args.num_meta_epochs,num_pseudo_label_epochs=args.num_pseudo_label_epochs,prob_thresh=args.prob_thresh,selected_acts=sa)
-                self_accs.append(accuracy(preds,numpyify(user_dset.y)))
-                self_best_accs.append(accuracy(best_preds,numpyify(user_dset.y)))
-                self_f1s.append(mean_f1(preds,numpyify(user_dset.y)))
-                self_best_f1s.append(mean_f1(best_preds,numpyify(user_dset.y)))
-                self_aris.append(rari(preds,numpyify(user_dset.y)))
-                self_best_aris.append(rari(best_preds,numpyify(user_dset.y)))
-                self_nmis.append(rnmi(preds,numpyify(user_dset.y)))
-                self_best_nmis.append(rnmi(best_preds,numpyify(user_dset.y)))
+                best_preds,preds,best_acc,best_nmi,best_ari,best_f1 = self.pseudo_label_cluster_meta_meta_loop(user_dset,num_meta_meta_epochs=args.num_meta_meta_epochs,num_meta_epochs=args.num_meta_epochs,num_pseudo_label_epochs=args.num_pseudo_label_epochs,prob_thresh=args.prob_thresh,selected_acts=sa)
                 self_preds.append(preds)
                 self_best_preds.append(best_preds)
+
+                self_best_accs.append(best_acc)
+                self_best_nmis.append(best_nmi)
+                self_best_aris.append(best_ari)
+                self_best_f1s.append(best_f1)
+                self_accs.append(accuracy(preds,numpyify(user_dset.y)))
+                self_aris.append(rari(preds,numpyify(user_dset.y)))
+                self_nmis.append(rnmi(preds,numpyify(user_dset.y)))
+                self_f1s.append(mean_f1(preds,numpyify(user_dset.y)))
             align_start_time = time.time()
             for other_user_id, (other_user_dset, sa) in user_dsets_as_dict.items():
                 preds = self.val_on(other_user_dset,test=ARGS.test)
@@ -384,18 +395,27 @@ class HARLearner():
             f.write(' '.join([str(a) for a in hmm_accs])+'\n')
             for relevant_arg in cl_args.RELEVANT_ARGS:
                 f.write(f"\n{relevant_arg}: {vars(ARGS).get(relevant_arg)}")
-            train_end_time = time.time()
-            total_train_time = asMinutes(train_end_time-train_start_time)
+            total_end_time = time.time()
+            total_train_time = asMinutes(self.total_train_time)
+            total_umap_time = asMinutes(self.total_umap_time)
+            total_cluster_time = asMinutes(self.total_cluster_time)
+            total_time = asMinutes(total_end_time-total_start_time)
             f.write(f'Total align time: {total_align_time}')
             f.write(f'Total train time: {total_train_time}')
+            f.write(f'Total umap time: {total_umap_time}')
+            f.write(f'Total cluster time: {total_cluster_time}')
+            f.write(f'Total time: {total_time}')
             cross_accs = np.array([[accuracy(debabled_mega_ultra_preds[pred_id][start_idxs[target_id]:start_idxs[target_id+1]],numpyify(user_dsets[target_id][0].y)) for target_id in range(len(user_dsets))] for pred_id in range(len(user_dsets))])
             cross_aris = np.array([[rari(debabled_mega_ultra_preds[pred_id][start_idxs[target_id]:start_idxs[target_id+1]],numpyify(user_dsets[target_id][0].y)) for target_id in range(len(user_dsets))] for pred_id in range(len(user_dsets))])
             cross_nmis = np.array([[rnmi(debabled_mega_ultra_preds[pred_id][start_idxs[target_id]:start_idxs[target_id+1]],numpyify(user_dsets[target_id][0].y)) for target_id in range(len(user_dsets))] for pred_id in range(len(user_dsets))])
             f.write(f'Mean cross acc: {mean_off_diagonal(cross_accs)}')
             f.write(f'Mean cross ari: {mean_off_diagonal(cross_aris)}')
             f.write(f'Mean cross nmi: {mean_off_diagonal(cross_nmis)}')
+            f.write(f'Total align time: {total_train_time}')
+            f.write(f'Total align time: {total_umap_time}')
+            f.write(f'Total align time: {total_cluster_time}')
             f.write(f'Total align time: {total_align_time}')
-            f.write(f'Total train time: {total_train_time}')
+            f.write(f'Total train time: {total_time}')
         np.save(f'experiments/{args.exp_name}/debabled_mega_ultra_preds',debabled_mega_ultra_preds)
         np.save(f'experiments/{args.exp_name}/cross_accs',cross_accs)
         np.save(f'experiments/{args.exp_name}/cross_aris',cross_aris)
@@ -410,6 +430,9 @@ class HARLearner():
         np.save(f'experiments/{args.exp_name}/self_best_nmis',self_best_nmis)
         print(f'Total align time: {total_align_time}')
         print(f'Total train time: {total_train_time}')
+        print(f'Total umap time: {total_umap_time}')
+        print(f'Total cluster time: {total_cluster_time}')
+        print(f'Total time: {total_time}')
         if ARGS.all_subjs:
             dset_name_dir_dict = {'PAMAP': 'PAMAP2_Dataset', 'REALDISP': 'realdisp', 'UCI': 'UCI2', 'WISDM-v1': 'wisdm_v1', 'WISDM-watch': 'wisdm-dataset'}
             np.save(f'datasets/{dset_name_dir_dict[ARGS.dset]}/full_ygt',np.concatenate([numpyify(d.y) for d,sa in user_dsets]))

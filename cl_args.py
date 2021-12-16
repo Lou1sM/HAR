@@ -39,6 +39,18 @@ def get_cl_args():
     ARGS = parser.parse_args()
 
     need_umap = False
+    if ARGS.test:
+        ARGS.num_meta_epochs = 1
+        ARGS.num_meta_meta_epochs = 1
+        ARGS.num_cluster_epochs = 1
+        ARGS.num_pseudo_label_epochs = 1
+    elif not ARGS.no_umap and not ARGS.show_shapes: need_umap = True
+    if ARGS.short_epochs:
+        ARGS.num_meta_meta_epochs = 2
+        ARGS.num_meta_epochs = 1
+        ARGS.num_cluster_epochs = 1
+        ARGS.num_pseudo_label_epochs = 1
+        print(ARGS)
     dset_info_object = project_config.get_dataset_info_object(ARGS.dset)
     all_possible_ids = dset_info_object.possible_subj_ids
     if ARGS.all_subjs: ARGS.subj_ids=all_possible_ids
