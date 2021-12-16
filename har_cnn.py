@@ -132,10 +132,10 @@ class HARLearner():
             conf_list = []
             best_f1 = 0
             for batch_idx, (xb,yb,idx) in enumerate(dl):
-                if len(xb) == 1: continue # If last batch is only one element then batchnorm will error
+                #if len(xb) == 1: continue # If last batch is only one element then batchnorm will error
                 latent = self.enc(xb)
                 if noise > 0: latent = noiseify(latent,noise)
-                label_pred = self.mlp(latent) if latent.ndim == 2 else self.mlp(latent[:,:,0,0])
+                label_pred = self.mlp(latent) if latent.ndim == 2 else self.mlp(latent.squeeze(2).squeeze(2))
                 batch_mask = 'none' if not is_mask  else multiplicative_mask[:self.batch_size] if ARGS.test else multiplicative_mask[idx]
                 loss = lf(label_pred,yb.long(),batch_mask)
                 if math.isnan(loss): set_trace()
@@ -539,7 +539,7 @@ def main(args):
     num_classes = args.num_classes if args.num_classes != -1 else true_num_classes
     enc = EncByLayer(x_filters,y_filters,x_strides,y_strides,max_pools,show_shapes=args.show_shapes)
     dec = DecByLayer(x_filters_trans,y_filters_trans,x_strides_trans,y_strides_trans,show_shapes=args.show_shapes)
-    mlp = Var_BS_MLP(32,25,num_classes)
+    mlp = Var_BS_MLP(32,256,num_classes)
     if args.load_pretrained:
         enc.load_state_dict(torch.load('enc_pretrained.pt'))
         mlp.load_state_dict(torch.load('dec_pretrained.pt'))

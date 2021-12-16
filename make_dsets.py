@@ -66,8 +66,6 @@ class StepDataset(data.Dataset):
         return total_loss
 
 def preproc_xys(x,y,step_size,window_size,action_name_dict):
-    x = x[y!=0]
-    y = y[y!=0]
     xnans = np.isnan(x).any(axis=1)
     x = x[~xnans]
     y = y[~xnans]
@@ -91,6 +89,8 @@ def make_pamap_dset_train_val(args,subj_ids):
     train_ids = subj_ids[:num_train_ids]
     x_train = np.concatenate([np.load(f'datasets/PAMAP2_Dataset/np_data/subject{s}.npy') for s in train_ids])
     y_train = np.concatenate([np.load(f'datasets/PAMAP2_Dataset/np_data/subject{s}_labels.npy') for s in train_ids])
+    x_train = x_train[y_train!=0] # 0 is a transient activity
+    y_train = y_train[y_train!=0] # 0 is a transient activity
     x_train,y_train,selected_acts = preproc_xys(x_train,y_train,args.step_size,args.window_size,action_name_dict)
     dset_train = StepDataset(x_train,y_train,device='cuda',window_size=args.window_size,step_size=args.step_size)
     if len(subj_ids) <= 2: return dset_train, dset_train, selected_acts
@@ -99,6 +99,8 @@ def make_pamap_dset_train_val(args,subj_ids):
     val_ids = subj_ids[num_train_ids:]
     x_val = np.concatenate([np.load(f'datasets/PAMAP2_Dataset/np_data/subject{s}.npy') for s in val_ids])
     y_val = np.concatenate([np.load(f'datasets/PAMAP2_Dataset/np_data/subject{s}_labels.npy') for s in val_ids])
+    x_val = x_val[y_val!=0] # 0 is a transient activity
+    y_val = y_val[y_val!=0] # 0 is a transient activity
     x_val,y_val,selected_acts = preproc_xys(x_val,y_val,args.step_size,args.window_size,action_name_dict)
     dset_val = StepDataset(x_val,y_val,device='cuda',window_size=args.window_size,step_size=args.step_size)
     return dset_train, dset_val, selected_acts
@@ -194,6 +196,8 @@ def make_realdisp_dset_train_val(args,subj_ids):
     x_train = np.concatenate([np.load(f'datasets/realdisp/np_data/subject{s}.npy') for s in train_ids])
     y_train = np.concatenate([np.load(f'datasets/realdisp/np_data/subject{s}_labels.npy') for s in train_ids])
     x_train = x_train[:,2:] #First two columns are timestamp
+    x_train = x_train[y_train!=0] # 0 seems to be a transient activity
+    y_train = y_train[y_train!=0] # 0 seems to be a transient activity
     x_train,y_train,selected_acts = preproc_xys(x_train,y_train,args.step_size,args.window_size,action_name_dict)
     dset_train = StepDataset(x_train,y_train,device='cuda',window_size=args.window_size,step_size=args.step_size)
     if len(subj_ids) <= 2: return dset_train, dset_train, selected_acts
@@ -202,6 +206,8 @@ def make_realdisp_dset_train_val(args,subj_ids):
     val_ids = subj_ids[num_train_ids:]
     x_val = np.concatenate([np.load(f'datasets/realdisp/np_data/subject{s}.npy') for s in val_ids])
     y_val = np.concatenate([np.load(f'datasets/realdisp/np_data/subject{s}_labels.npy') for s in val_ids])
+    x_val = x_val[y_val!=0] # 0 seems to be a transient activity
+    y_val = y_val[y_val!=0] # 0 seems to be a transient activity
     x_val,y_val,selected_acts = preproc_xys(x_val,y_val,args.step_size,args.window_size,action_name_dict)
     dset_val = StepDataset(x_val,y_val,device='cuda',window_size=args.window_size,step_size=args.step_size)
     return dset_train, dset_val, selected_acts
