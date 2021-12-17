@@ -471,8 +471,8 @@ def main(args):
     enc.cuda()
     mlp.cuda()
     subj_ids = args.subj_ids
-    dset_train, selected_acts = make_single_dset(args,subj_ids)
     if args.show_shapes:
+        dset_train, selected_acts = make_single_dset(args,subj_ids)
         num_ftrs = dset_train.x.shape[-1]
         print(num_ftrs)
         lat = enc(torch.ones((2,1,512,num_ftrs),device='cuda'))
@@ -490,6 +490,7 @@ def main(args):
     dsets_by_id = {k:v for k,v in dsets_by_id.items() if k not in bad_ids}
     if args.train_type == 'train_frac_gts_as_single':
         print("TRAINING ON WITH FRAC GTS AS SINGLE DSET")
+        dset_train, selected_acts = make_single_dset(args,subj_ids)
         acc,f1,preds,confs = har.train_with_fract_gts_on(dset_train,args.num_pseudo_label_epochs,args.frac_gt_labels)
         print(acc)
     elif args.train_type == 'full':
