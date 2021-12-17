@@ -69,8 +69,9 @@ class Var_BS_MLP(nn.Module):
         return x
 
 class HARLearner():
-    def __init__(self,enc,mlp,batch_size,num_classes):
-        self.batch_size = batch_size
+    def __init__(self,enc,mlp,train_batch_size,val_batch_size,num_classes):
+        self.train_batch_size = train_batch_size
+        self.val_batch_size = val_batch_size
         self.num_classes = num_classes
         self.enc = enc
         self.mlp = mlp
@@ -86,7 +87,7 @@ class HARLearner():
     def get_latents(self,dset):
         self.enc.eval()
         collected_latents = []
-        determin_dl = data.DataLoader(dset,batch_sampler=data.BatchSampler(data.SequentialSampler(dset),self.batch_size,drop_last=False),pin_memory=False)
+        determin_dl = data.DataLoader(dset,batch_sampler=data.BatchSampler(data.SequentialSampler(dset),self.val_batch_size,drop_last=False),pin_memory=False)
         for idx, (xb,yb,tb) in enumerate(determin_dl):
             batch_latents = self.enc(xb)
             batch_latents = batch_latents.view(batch_latents.shape[0],-1).detach().cpu().numpy()
@@ -101,7 +102,7 @@ class HARLearner():
         start_time = time.time()
         if lf is None: lf = self.pseudo_label_lf
         sampler = data.RandomSampler(dset) if custom_sampler is 'none' else custom_sampler
-        dl = data.DataLoader(dset,batch_sampler=data.BatchSampler(sampler,self.batch_size,drop_last=False),pin_memory=False)
+        dl = data.DataLoader(dset,batch_sampler=data.BatchSampler(sampler,self.train_batch_size,drop_last=False),pin_memory=False)
         is_mask = multiplicative_mask is not 'none'
         for epoch in range(num_epochs):
             pred_list = []
@@ -110,7 +111,7 @@ class HARLearner():
                 latent = self.enc(xb)
                 if noise > 0: latent = noiseify(latent,noise)
                 label_pred = self.mlp(latent) if latent.ndim == 2 else self.mlp(latent.squeeze(2).squeeze(2))
-                batch_mask = 'none' if not is_mask  else multiplicative_mask[:self.batch_size] if ARGS.test else multiplicative_mask[idx]
+                batch_mask = 'none' if not is_mask  else multiplicative_mask[:self.train_batch_size] if ARGS.test else multiplicative_mask[idx]
                 loss = lf(label_pred,yb.long(),batch_mask)
                 if math.isnan(loss): set_trace()
                 if rlmbda>0:
@@ -136,8 +137,7 @@ class HARLearner():
         self.enc.eval()
         self.mlp.eval()
         pred_list = []
-        bs = min(len(dset), int(8192*12/dset.x.shape[-1]))
-        dl = data.DataLoader(dset,batch_sampler=data.BatchSampler(data.SequentialSampler(dset),bs,drop_last=False),pin_memory=False)
+        dl = data.DataLoader(dset,batch_sampler=data.BatchSampler(data.SequentialSampler(dset),self.val_batch_size,drop_last=False),pin_memory=False)
         for batch_idx, (xb,yb,idx) in enumerate(dl):
             latent = self.enc(xb)
             label_pred = self.mlp(latent) if latent.ndim == 2 else self.mlp(latent[:,:,0,0])
@@ -225,7 +225,9 @@ class HARLearner():
 
     def pseudo_label_cluster_meta_meta_loop(self,dset,num_meta_meta_epochs,num_meta_epochs,num_pseudo_label_epochs,prob_thresh,selected_acts):
         y_np = numpyify(dset.y)
-        best_preds_so_far = -np.ones(len(dset))
+        best_preds_so_far = dummy_labels(self.num_classes,len(dset.y))
+        preds = dummy_labels(self.num_classes,len(dset.y))
+        best_acc,best_nmi,best_ari,best_f1 = 0,0,0,0
         got_by_super_masks = np.zeros(len(dset)).astype(np.bool)
         got_by_super_super_masks = np.zeros(len(dset)).astype(np.bool)
         got_by_masks = np.zeros(len(dset)).astype(np.bool)
@@ -259,9 +261,6 @@ class HARLearner():
             best_ari = rari(best_preds_so_far,y_np)
             best_f1 = mean_f1(best_preds_so_far,y_np)
             print('Results of best so far',best_acc,best_nmi,best_ari,best_f1)
-
-        surely_correct = np.stack(super_mask_histories).all(axis=0)
-        macc = lambda mask: accuracy(best_preds_so_far[mask],y_np[mask])
 
         return best_preds_so_far,preds,best_acc,best_nmi,best_ari,best_f1
 
@@ -300,6 +299,7 @@ class HARLearner():
                 preds = self.val_on(other_user_dset,test=ARGS.test)
                 preds_from_this_user.append(preds)
             preds_from_users_list.append(np.concatenate(preds_from_this_user))
+            print([len(x) for x in preds_from_users_list])
             total_align_time += time.time() - align_start_time
             if ARGS.just_align_time: print(round(total_align_time,4))
         if ARGS.just_align_time:
@@ -318,6 +318,7 @@ class HARLearner():
 
         check_dir(f'experiments/{args.exp_name}/hmm_self_preds')
         check_dir(f'experiments/{args.exp_name}/hmm_best_preds')
+        check_dir(f'experiments/{args.exp_name}/mlp_self_preds')
         np.save(f'experiments/{args.exp_name}/debabled_mega_ultra_preds',debabled_mega_ultra_preds)
         for uid, hsp in zip(user_dsets_as_dict.keys(),hmm_self_preds):
             np.save(f'experiments/{args.exp_name}/hmm_self_preds/{uid}',hsp)
@@ -326,31 +327,25 @@ class HARLearner():
         for uid, hbp in zip(user_dsets_as_dict.keys(),hmm_best_preds):
             np.save(f'experiments/{args.exp_name}/hmm_best_preds/{uid}',hbp)
         np.save(f'experiments/{args.exp_name}/debabled_mega_ultra_preds',debabled_mega_ultra_preds)
-        cross_accs = np.array([[accuracy(debabled_mega_ultra_preds[pred_id][start_idxs[target_id]:start_idxs[target_id+1]],numpyify(user_dsets[target_id][0].y)) for target_id in range(len(user_dsets))] for pred_id in range(len(user_dsets))])
-        cross_aris = np.array([[rari(debabled_mega_ultra_preds[pred_id][start_idxs[target_id]:start_idxs[target_id+1]],numpyify(user_dsets[target_id][0].y)) for target_id in range(len(user_dsets))] for pred_id in range(len(user_dsets))])
-        cross_nmis = np.array([[rnmi(debabled_mega_ultra_preds[pred_id][start_idxs[target_id]:start_idxs[target_id+1]],numpyify(user_dsets[target_id][0].y)) for target_id in range(len(user_dsets))] for pred_id in range(len(user_dsets))])
-        np.save(f'experiments/{args.exp_name}/debabled_mega_ultra_preds',debabled_mega_ultra_preds)
-        np.save(f'experiments/{args.exp_name}/cross_accs',cross_accs)
-        np.save(f'experiments/{args.exp_name}/cross_aris',cross_aris)
-        np.save(f'experiments/{args.exp_name}/cross_nmis',cross_nmis)
-        np.save(f'experiments/{args.exp_name}/self_accs',self_accs)
-        np.save(f'experiments/{args.exp_name}/self_f1s',self_f1s)
-        np.save(f'experiments/{args.exp_name}/self_aris',self_aris)
-        np.save(f'experiments/{args.exp_name}/self_nmis',self_nmis)
-        np.save(f'experiments/{args.exp_name}/self_best_accs',self_best_accs)
-        np.save(f'experiments/{args.exp_name}/self_best_f1s',self_best_f1s)
-        np.save(f'experiments/{args.exp_name}/self_best_aris',self_best_aris)
-        np.save(f'experiments/{args.exp_name}/self_best_nmis',self_best_nmis)
+        np_things = ['debabled_mega_ultra_preds','self_accs','self_f1s','self_aris','self_nmis','self_best_accs','self_best_f1s','self_best_aris','self_best_nmis']
+        if args.compute_cross_metrics:
+            cross_accs = np.array([[accuracy(debabled_mega_ultra_preds[pred_id][start_idxs[target_id]:start_idxs[target_id+1]],numpyify(user_dsets[target_id][0].y)) for target_id in range(len(user_dsets))] for pred_id in range(len(user_dsets))])
+            cross_aris = np.array([[rari(debabled_mega_ultra_preds[pred_id][start_idxs[target_id]:start_idxs[target_id+1]],numpyify(user_dsets[target_id][0].y)) for target_id in range(len(user_dsets))] for pred_id in range(len(user_dsets))])
+            cross_nmis = np.array([[rnmi(debabled_mega_ultra_preds[pred_id][start_idxs[target_id]:start_idxs[target_id+1]],numpyify(user_dsets[target_id][0].y)) for target_id in range(len(user_dsets))] for pred_id in range(len(user_dsets))])
+            np_things += ['cross_accs','cross_aris','cross_nmis']
+        for np_thing in np_things:
+            exec(f"np.save('experiments/{args.exp_name}/{np_thing}',{np_thing})")
 
-        scores_by_metric_name = {'self':self_preds,'self_best':best_preds,'hmm':hmm_self_preds,'hmm_best':hmm_best_preds,'mlp': mlp_self_preds}
+        scores_by_metric_name = {'self':self_preds,'self_best':self_best_preds,'hmm':hmm_self_preds,'hmm_best':hmm_best_preds,'mlp': mlp_self_preds}
         results_file_path = f'experiments/{args.exp_name}/results.txt'
         compute_and_save_metrics(scores_by_metric_name,[numpyify(d.y) for d,sa in user_dsets],results_file_path)
 
         check_dir(f'experiments/{args.exp_name}/mlp_self_preds')
         with open(results_file_path,'w') as f:
-            f.write(f'Mean cross acc: {mean_off_diagonal(cross_accs)}')
-            f.write(f'Mean cross ari: {mean_off_diagonal(cross_aris)}')
-            f.write(f'Mean cross nmi: {mean_off_diagonal(cross_nmis)}')
+            if args.compute_cross_metrics:
+                f.write(f'Mean cross acc: {mean_off_diagonal(cross_accs)}')
+                f.write(f'Mean cross ari: {mean_off_diagonal(cross_aris)}')
+                f.write(f'Mean cross nmi: {mean_off_diagonal(cross_nmis)}')
             f.write(f'Total align time: {total_train_time}')
             f.write(f'Total align time: {total_umap_time}')
             f.write(f'Total align time: {total_cluster_time}')
@@ -375,15 +370,15 @@ class HARLearner():
 def compute_and_save_metrics(preds_dict,gts,results_file_path):
     total_num_dpoints = sum([len(item) for item in gts])
     for preds_name, preds in preds_dict.items():
-        accs = [accuracy(preds,gt) for pred, gt in zip(preds,gts)]
-        nmis = [rnmi(preds,gt) for pred, gt in zip(preds,gts)]
-        aris = [rari(preds,gt) for pred, gt in zip(preds,gts)]
-        mf1s = [mean_f1(preds,gt) for pred, gt in zip(preds,gts)]
+        accs = [accuracy(p,gt) for p, gt in zip(preds,gts)]
+        nmis = [rnmi(p,gt) for p, gt in zip(preds,gts)]
+        aris = [rari(p,gt) for p, gt in zip(preds,gts)]
+        mf1s = [mean_f1(p,gt) for p, gt in zip(preds,gts)]
         for metric_name, scores in zip(('Acc','NMI','ARI','MeanF1'),[accs,nmis,aris,mf1s]):
             avg_score = sum([s*len(gt) for s,gt in zip(scores, gts)])/total_num_dpoints
             print(f"{preds_name} {metric_name}: {avg_score}")
             if results_file_path != 'none':
-                with open(results_file_path) as f:
+                with open(results_file_path,'w') as f:
                     f.write(f"{preds_name} {metric_name}: {avg_score}")
                     f.write('\nAll {preds_name} {metric_name}:\n')
                     f.write(' '.join([str(s) for s in scores])+'\n')
@@ -423,7 +418,7 @@ def main(args):
         enc.load_state_dict(torch.load('enc_pretrained.pt'))
     subj_ids = args.subj_ids
 
-    har = HARLearner(enc=enc,mlp=mlp,batch_size=args.batch_size,num_classes=num_classes)
+    har = HARLearner(enc=enc,mlp=mlp,train_batch_size=args.batch_size_train,val_batch_size=args.batch_size_val,num_classes=num_classes)
 
     if args.show_shapes:
         dset_train, selected_acts = make_single_dset(args,subj_ids)
