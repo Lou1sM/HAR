@@ -132,7 +132,6 @@ class HARLearner():
         self.total_train_time += time.time() - start_time
         return pred_array_ordered
 
-
     def val_on(self,dset,test):
         self.enc.eval()
         self.mlp.eval()
@@ -310,75 +309,26 @@ class HARLearner():
         start_idxs = [sum([len(d) for d,sa in user_dsets[:i]]) for i in range(len(user_dsets)+1)]
         mlp_self_preds = [debabled_mega_ultra_preds[uid][start_idxs[uid]:start_idxs[uid+1]] for uid in range(len(user_dsets))]
         hmm_self_preds = [translate_labellings(sa,ta) for sa,ta in zip(self_preds,mlp_self_preds)]
+        hmm_best_preds = [translate_labellings(sa,ta) for sa,ta in zip(self_best_preds,mlp_self_preds)]
+        total_train_time = asMinutes(self.total_train_time)
+        total_umap_time = asMinutes(self.total_umap_time)
+        total_cluster_time = asMinutes(self.total_cluster_time)
+        total_end_time = time.time()
+        total_time = asMinutes(total_end_time-total_start_time)
 
-        check_dir(f'experiments/{args.exp_name}')
+        check_dir(f'experiments/{args.exp_name}/hmm_self_preds')
+        check_dir(f'experiments/{args.exp_name}/hmm_best_preds')
         np.save(f'experiments/{args.exp_name}/debabled_mega_ultra_preds',debabled_mega_ultra_preds)
-        mlp_accs = [accuracy(p,numpyify(d.y)) for p,(d,sa) in zip(mlp_self_preds,user_dsets)]
-        mlp_f1s = [mean_f1(p,numpyify(d.y)) for p,(d,sa) in zip(mlp_self_preds,user_dsets)]
-        mlp_aris = [rari(p,numpyify(d.y)) for p,(d,sa) in zip(mlp_self_preds,user_dsets)]
-        mlp_nmis = [rnmi(p,numpyify(d.y)) for p,(d,sa) in zip(mlp_self_preds,user_dsets)]
-        hmm_accs = [accuracy(p,numpyify(d.y)) for p,(d,sa) in zip(hmm_self_preds,user_dsets)]
-        hmm_f1s = [mean_f1(p,numpyify(d.y)) for p,(d,sa) in zip(hmm_self_preds,user_dsets)]
-        hmm_aris = [rari(p,numpyify(d.y)) for p,(d,sa) in zip(hmm_self_preds,user_dsets)]
-        hmm_nmis = [rnmi(p,numpyify(d.y)) for p,(d,sa) in zip(hmm_self_preds,user_dsets)]
-        total_num_dpoints = sum(len(ud) for ud,sa in user_dsets)
-        with open(f'experiments/{args.exp_name}/results.txt','w') as f:
-            for n,acc_list in zip(('self','best_self','mlp','hmm'),(self_accs,self_best_accs,mlp_accs,hmm_accs)):
-                avg_acc = sum([a*len(ud) for a, (ud, sa) in zip(acc_list, user_dsets)])/total_num_dpoints
-                print(f'Acc {n}: {round(avg_acc,5)}')
-                f.write(f'Acc {n}: {round(avg_acc,5)}\n')
-            for n,f1_list in zip(('self','best_self','mlp','hmm'),(self_f1s,self_best_f1s,mlp_f1s,hmm_f1s)):
-                avg_f1 = sum([a*len(ud) for a, (ud, sa) in zip(f1_list, user_dsets)])/total_num_dpoints
-                print(f'F1 {n}: {round(avg_f1,5)}')
-                f.write(f'F1 {n}: {round(avg_f1,5)}\n')
-            for n,ari_list in zip(('self','best_self','mlp','hmm'),(self_aris,self_best_aris,mlp_aris,hmm_aris)):
-                avg_ari = sum([a*len(ud) for a, (ud, sa) in zip(ari_list, user_dsets)])/total_num_dpoints
-                print(f'ARI {n}: {round(avg_ari,5)}')
-                f.write(f'ARI {n}: {round(avg_ari,5)}\n')
-            for n,nmi_list in zip(('self','best_self','mlp','hmm'),(self_nmis,self_best_nmis,mlp_nmis,hmm_nmis)):
-                avg_nmi = sum([a*len(ud) for a, (ud, sa) in zip(nmi_list, user_dsets)])/total_num_dpoints
-                print(f'NMI {n}: {round(avg_nmi,5)}')
-                f.write(f'NMI {n}: {round(avg_nmi,5)}\n')
-            f.write('\nAll mlp_accs\n')
-            f.write(' '.join([str(a) for a in mlp_accs])+'\n')
-            f.write('\nAll mlp_f1s\n')
-            f.write(' '.join([str(a) for a in mlp_accs])+'\n')
-            f.write('\nAll mlp_aris\n')
-            f.write(' '.join([str(a) for a in mlp_accs])+'\n')
-            f.write('\nAll mlp_nmis\n')
-            f.write(' '.join([str(a) for a in mlp_accs])+'\n')
-
-            f.write('\nAll hmm_accs\n')
-            f.write(' '.join([str(a) for a in hmm_accs])+'\n')
-            f.write('\nAll hmm_f1s\n')
-            f.write(' '.join([str(a) for a in hmm_accs])+'\n')
-            f.write('\nAll hmm_aris\n')
-            f.write(' '.join([str(a) for a in hmm_accs])+'\n')
-            f.write('\nAll hmm_nmis\n')
-            f.write(' '.join([str(a) for a in hmm_accs])+'\n')
-            for relevant_arg in cl_args.RELEVANT_ARGS:
-                f.write(f"\n{relevant_arg}: {vars(ARGS).get(relevant_arg)}")
-            total_end_time = time.time()
-            total_train_time = asMinutes(self.total_train_time)
-            total_umap_time = asMinutes(self.total_umap_time)
-            total_cluster_time = asMinutes(self.total_cluster_time)
-            total_time = asMinutes(total_end_time-total_start_time)
-            f.write(f'Total align time: {total_align_time}')
-            f.write(f'Total train time: {total_train_time}')
-            f.write(f'Total umap time: {total_umap_time}')
-            f.write(f'Total cluster time: {total_cluster_time}')
-            f.write(f'Total time: {total_time}')
-            cross_accs = np.array([[accuracy(debabled_mega_ultra_preds[pred_id][start_idxs[target_id]:start_idxs[target_id+1]],numpyify(user_dsets[target_id][0].y)) for target_id in range(len(user_dsets))] for pred_id in range(len(user_dsets))])
-            cross_aris = np.array([[rari(debabled_mega_ultra_preds[pred_id][start_idxs[target_id]:start_idxs[target_id+1]],numpyify(user_dsets[target_id][0].y)) for target_id in range(len(user_dsets))] for pred_id in range(len(user_dsets))])
-            cross_nmis = np.array([[rnmi(debabled_mega_ultra_preds[pred_id][start_idxs[target_id]:start_idxs[target_id+1]],numpyify(user_dsets[target_id][0].y)) for target_id in range(len(user_dsets))] for pred_id in range(len(user_dsets))])
-            f.write(f'Mean cross acc: {mean_off_diagonal(cross_accs)}')
-            f.write(f'Mean cross ari: {mean_off_diagonal(cross_aris)}')
-            f.write(f'Mean cross nmi: {mean_off_diagonal(cross_nmis)}')
-            f.write(f'Total align time: {total_train_time}')
-            f.write(f'Total align time: {total_umap_time}')
-            f.write(f'Total align time: {total_cluster_time}')
-            f.write(f'Total align time: {total_align_time}')
-            f.write(f'Total train time: {total_time}')
+        for uid, hsp in zip(user_dsets_as_dict.keys(),hmm_self_preds):
+            np.save(f'experiments/{args.exp_name}/hmm_self_preds/{uid}',hsp)
+        for uid, msp in zip(user_dsets_as_dict.keys(),mlp_self_preds):
+            np.save(f'experiments/{args.exp_name}/mlp_self_preds/{uid}',msp)
+        for uid, hbp in zip(user_dsets_as_dict.keys(),hmm_best_preds):
+            np.save(f'experiments/{args.exp_name}/hmm_best_preds/{uid}',hbp)
+        np.save(f'experiments/{args.exp_name}/debabled_mega_ultra_preds',debabled_mega_ultra_preds)
+        cross_accs = np.array([[accuracy(debabled_mega_ultra_preds[pred_id][start_idxs[target_id]:start_idxs[target_id+1]],numpyify(user_dsets[target_id][0].y)) for target_id in range(len(user_dsets))] for pred_id in range(len(user_dsets))])
+        cross_aris = np.array([[rari(debabled_mega_ultra_preds[pred_id][start_idxs[target_id]:start_idxs[target_id+1]],numpyify(user_dsets[target_id][0].y)) for target_id in range(len(user_dsets))] for pred_id in range(len(user_dsets))])
+        cross_nmis = np.array([[rnmi(debabled_mega_ultra_preds[pred_id][start_idxs[target_id]:start_idxs[target_id+1]],numpyify(user_dsets[target_id][0].y)) for target_id in range(len(user_dsets))] for pred_id in range(len(user_dsets))])
         np.save(f'experiments/{args.exp_name}/debabled_mega_ultra_preds',debabled_mega_ultra_preds)
         np.save(f'experiments/{args.exp_name}/cross_accs',cross_accs)
         np.save(f'experiments/{args.exp_name}/cross_aris',cross_aris)
@@ -391,14 +341,54 @@ class HARLearner():
         np.save(f'experiments/{args.exp_name}/self_best_f1s',self_best_f1s)
         np.save(f'experiments/{args.exp_name}/self_best_aris',self_best_aris)
         np.save(f'experiments/{args.exp_name}/self_best_nmis',self_best_nmis)
+
+        scores_by_metric_name = {'self':self_preds,'self_best':best_preds,'hmm':hmm_self_preds,'hmm_best':hmm_best_preds,'mlp': mlp_self_preds}
+        results_file_path = f'experiments/{args.exp_name}/results.txt'
+        compute_and_save_metrics(scores_by_metric_name,[numpyify(d.y) for d,sa in user_dsets],results_file_path)
+
+        check_dir(f'experiments/{args.exp_name}/mlp_self_preds')
+        with open(results_file_path,'w') as f:
+            f.write(f'Mean cross acc: {mean_off_diagonal(cross_accs)}')
+            f.write(f'Mean cross ari: {mean_off_diagonal(cross_aris)}')
+            f.write(f'Mean cross nmi: {mean_off_diagonal(cross_nmis)}')
+            f.write(f'Total align time: {total_train_time}')
+            f.write(f'Total align time: {total_umap_time}')
+            f.write(f'Total align time: {total_cluster_time}')
+            f.write(f'Total align time: {total_align_time}')
+            f.write(f'Total train time: {total_time}')
+            for relevant_arg in cl_args.RELEVANT_ARGS:
+                f.write(f"\n{relevant_arg}: {vars(ARGS).get(relevant_arg)}")
+            f.write(f'Total align time: {total_align_time}')
+            f.write(f'Total train time: {total_train_time}')
+            f.write(f'Total umap time: {total_umap_time}')
+            f.write(f'Total cluster time: {total_cluster_time}')
+            f.write(f'Total time: {total_time}')
         print(f'Total align time: {total_align_time}')
         print(f'Total train time: {total_train_time}')
         print(f'Total umap time: {total_umap_time}')
         print(f'Total cluster time: {total_cluster_time}')
         print(f'Total time: {total_time}')
         if ARGS.all_subjs:
-            dset_name_dir_dict = {'PAMAP': 'PAMAP2_Dataset', 'REALDISP': 'realdisp', 'UCI': 'UCI2', 'WISDM-v1': 'wisdm_v1', 'WISDM-watch': 'wisdm-dataset'}
-            np.save(f'datasets/{dset_name_dir_dict[ARGS.dset]}/full_ygt',np.concatenate([numpyify(d.y) for d,sa in user_dsets]))
+            dset_info_object = get_dataset_info_object(args.dset)
+            np.save(f'datasets/{dset_info_object.dataset_dir_name}/full_ygt',np.concatenate([numpyify(d.y) for d,sa in user_dsets]))
+
+def compute_and_save_metrics(preds_dict,gts,results_file_path):
+    total_num_dpoints = sum([len(item) for item in gts])
+    for preds_name, preds in preds_dict.items():
+        accs = [accuracy(preds,gt) for pred, gt in zip(preds,gts)]
+        nmis = [rnmi(preds,gt) for pred, gt in zip(preds,gts)]
+        aris = [rari(preds,gt) for pred, gt in zip(preds,gts)]
+        mf1s = [mean_f1(preds,gt) for pred, gt in zip(preds,gts)]
+        for metric_name, scores in zip(('Acc','NMI','ARI','MeanF1'),[accs,nmis,aris,mf1s]):
+            avg_score = sum([s*len(gt) for s,gt in zip(scores, gts)])/total_num_dpoints
+            print(f"{preds_name} {metric_name}: {avg_score}")
+            if results_file_path != 'none':
+                with open(results_file_path) as f:
+                    f.write(f"{preds_name} {metric_name}: {avg_score}")
+                    f.write('\nAll {preds_name} {metric_name}:\n')
+                    f.write(' '.join([str(s) for s in scores])+'\n')
+
+
 
 def mean_off_diagonal(mat):
     upper_sum = np.triu(mat,1).sum()
@@ -439,7 +429,7 @@ def main(args):
         dset_train, selected_acts = make_single_dset(args,subj_ids)
         num_ftrs = dset_train.x.shape[-1]
         print(num_ftrs)
-        lat = enc(torch.ones((2,1,512,num_ftrs))
+        lat = enc(torch.ones((2,1,512,num_ftrs)))
     elif args.train_type == 'full':
         dsets_by_id = make_dsets_by_user(args,subj_ids)
         bad_ids = []
