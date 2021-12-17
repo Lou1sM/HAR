@@ -68,10 +68,10 @@ class StepDataset(data.Dataset):
 def preproc_xys(x,y,step_size,window_size,dset_info_object,subj_ids):
     ids_string = 'all' if set(subj_ids) == set(dset_info_object.possible_subj_ids) else "-".join(subj_ids)
     precomp_dir = f'datasets/{dset_info_object.dataset_dir_name}/precomputed/{ids_string}step{step_size}_window{window_size}/'
-    if os.path.isfile(join(precomp_dir,'x.npy')) and os.path.isfile(join(precomp_dir,'y.npy')):
+    if os.path.isfile(join(precomp_dir,'x.pt')) and os.path.isfile(join(precomp_dir,'y.pt')):
         print("loading precomputed datasets")
-        x = torch.load(join(precomp_dir,'x.npy'))
-        y = torch.load(join(precomp_dir,'y.npy'))
+        x = torch.load(join(precomp_dir,'x.pt'))
+        y = torch.load(join(precomp_dir,'y.pt'))
         with open(join(precomp_dir,'selected_acts.txt')) as f: selected_acts = f.readlines()
     else:
         print("no precomputed datasets, computing from scratch")
@@ -90,8 +90,8 @@ def preproc_xys(x,y,step_size,window_size,dset_info_object,subj_ids):
         x = torch.tensor(x).float()
         y = torch.tensor(mode_labels).float()
         check_dir(precomp_dir)
-        torch.save(x,join(precomp_dir,'x.npy'))
-        torch.save(y,join(precomp_dir,'y.npy'))
+        torch.save(x,join(precomp_dir,'x.pt'))
+        torch.save(y,join(precomp_dir,'y.pt'))
         with open(join(precomp_dir,'selected_acts.txt'),'w') as f:
             for a in selected_acts: f.write(a+'\n')
     return x, y, selected_acts
