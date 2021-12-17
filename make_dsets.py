@@ -9,11 +9,11 @@ from dl_utils import label_funcs
 from pdb import set_trace
 from os.path import join
 
+
+torch.set_default_tensor_type('torch.cuda.FloatTensor')
 class ChunkDataset(data.Dataset):
-    def __init__(self,x,y,device):
-        self.device=device
+    def __init__(self,x,y):
         self.x, self.y = x,y
-        self.x, self.y = self.x.to(self.device),self.y.to(self.device)
     def __len__(self): return len(self.x)
     def __getitem__(self,idx):
         batch_x = self.x[idx].unsqueeze(0)
@@ -22,12 +22,10 @@ class ChunkDataset(data.Dataset):
 
 class ConcattedDataset(data.Dataset):
     """Needs datasets to be StepDatasets in order to Concat them."""
-    def __init__(self,xs,ys,device,window_size,step_size):
-        self.device=device
+    def __init__(self,xs,ys,window_size,step_size):
         self.x, self.y = torch.cat(xs),torch.cat(ys)
         self.window_size = window_size
         self.step_size = step_size
-        self.x, self.y = self.x.to(self.device),self.y.to(self.device)
         component_dset_lengths = [((len(x)-self.window_size)//self.step_size + 1) for x in xs]
         x_idx_locs = []
         block_start_idx = 0
@@ -45,15 +43,13 @@ class ConcattedDataset(data.Dataset):
         return batch_x, batch_y, idx
 
 class StepDataset(data.Dataset):
-    def __init__(self,x,y,device,window_size,step_size,transforms=[]):
-        self.device=device
+    def __init__(self,x,y,window_size,step_size,transforms=[]):
         self.x, self.y = x,y
         self.window_size = window_size
         self.step_size = step_size
         self.transforms = transforms
         for transform in transforms:
             self.x = transform(self.x)
-        self.x, self.y = self.x.to(self.device),self.y.to(self.device)
     def __len__(self): return (len(self.x)-self.window_size)//self.step_size + 1
     def __getitem__(self,idx):
         batch_x = self.x[idx*self.step_size:(idx*self.step_size) + self.window_size].unsqueeze(0)
@@ -70,7 +66,8 @@ class StepDataset(data.Dataset):
         return total_loss
 
 def preproc_xys(x,y,step_size,window_size,dset_info_object,subj_ids):
-    precomp_dir = f'datasets/{dset_info_object.dataset_dir_name}/precomputed/{"-".join(subj_ids)}step{step_size}_window{window_size}/'
+    ids_string = 'all' if set(subj_ids) == set(dset_info_object.possible_subj_ids) else "-".join(subj_ids)
+    precomp_dir = f'datasets/{dset_info_object.dataset_dir_name}/precomputed/{ids_string}step{step_size}_window{window_size}/'
     if os.path.isfile(join(precomp_dir,'x.npy')) and os.path.isfile(join(precomp_dir,'y.npy')):
         print("loading precomputed datasets")
         x = torch.load(join(precomp_dir,'x.npy'))
@@ -90,8 +87,8 @@ def preproc_xys(x,y,step_size,window_size,dset_info_object,subj_ids):
         selected_acts = [dset_info_object.action_name_dict[act_id] for act_id in selected_ids]
         mode_labels, trans_dict, changed = label_funcs.compress_labels(mode_labels)
         assert len(selected_acts) == len(set(mode_labels))
-        x = torch.tensor(x,device='cuda').float()
-        y = torch.tensor(mode_labels,device='cuda').float()
+        x = torch.tensor(x).float()
+        y = torch.tensor(mode_labels).float()
         check_dir(precomp_dir)
         torch.save(x,join(precomp_dir,'x.npy'))
         torch.save(y,join(precomp_dir,'y.npy'))
@@ -106,7 +103,7 @@ def make_pamap_dset_train_val(args,subj_ids):
     x_train = x_train[y_train!=0] # 0 is a transient activity
     y_train = y_train[y_train!=0] # 0 is a transient activity
     x_train,y_train,selected_acts = preproc_xys(x_train,y_train,args.step_size,args.window_size,dset_info_object,subj_ids)
-    dset_train = StepDataset(x_train,y_train,device='cuda',window_size=args.window_size,step_size=args.step_size)
+    dset_train = StepDataset(x_train,y_train,window_size=args.window_size,step_size=args.step_size)
     return dset_train, selected_acts
 
 def make_uci_dset_train_val(args,subj_ids):
@@ -119,7 +116,7 @@ def make_uci_dset_train_val(args,subj_ids):
     #y_train = y_train[y_train!=-1]
     #y_val = y_val[y_val!=-1]
     x_train,y_train,selected_acts = preproc_xys(x_train,y_train,args.step_size,args.window_size,dset_info_object,subj_ids)
-    dset_train = StepDataset(x_train,y_train,device='cuda',window_size=args.window_size,step_size=args.step_size)
+    dset_train = StepDataset(x_train,y_train,window_size=args.window_size,step_size=args.step_size)
     return dset_train, selected_acts
 
 def make_wisdm_v1_dset_train_val(args,subj_ids):
@@ -134,7 +131,7 @@ def make_wisdm_v1_dset_train_val(args,subj_ids):
     x_train = x[train_idxs_to_user]
     y_train = y[train_idxs_to_user]
     x_train,y_train,selected_acts = preproc_xys(x_train,y_train,args.step_size,args.window_size,dset_info_object,subj_ids)
-    dset_train = StepDataset(x_train,y_train,device='cuda',window_size=args.window_size,step_size=args.step_size)
+    dset_train = StepDataset(x_train,y_train,window_size=args.window_size,step_size=args.step_size)
     return dset_train, selected_acts
 
 def make_wisdm_watch_dset_train_val(args,subj_ids):
@@ -145,7 +142,7 @@ def make_wisdm_watch_dset_train_val(args,subj_ids):
     x_train = x_train[certains_train]
     y_train = y_train[certains_train]
     x_train,y_train,selected_acts = preproc_xys(x_train,y_train,args.step_size,args.window_size,dset_info_object,subj_ids)
-    dset_train = StepDataset(x_train,y_train,device='cuda',window_size=args.window_size,step_size=args.step_size)
+    dset_train = StepDataset(x_train,y_train,window_size=args.window_size,step_size=args.step_size)
     return dset_train, selected_acts
 
 def make_realdisp_dset_train_val(args,subj_ids):
@@ -156,7 +153,7 @@ def make_realdisp_dset_train_val(args,subj_ids):
     x_train = x_train[y_train!=0] # 0 seems to be a transient activity
     y_train = y_train[y_train!=0] # 0 seems to be a transient activity
     x_train,y_train,selected_acts = preproc_xys(x_train,y_train,args.step_size,args.window_size,dset_info_object,subj_ids)
-    dset_train = StepDataset(x_train,y_train,device='cuda',window_size=args.window_size,step_size=args.step_size)
+    dset_train = StepDataset(x_train,y_train,window_size=args.window_size,step_size=args.step_size)
     return dset_train, selected_acts
 
 def make_capture_dset_train_val(args,subj_ids):
@@ -167,7 +164,7 @@ def make_capture_dset_train_val(args,subj_ids):
     x_train = np.concatenate([np.load(f'datasets/capture24/np_data/P{three_digitify(s)}.npy') for s in subj_ids])
     y_train = np.concatenate([np.load(f'datasets/capture24/np_data/P{three_digitify(s)}_labels.npy') for s in subj_ids])
     x_train,y_train,selected_acts = preproc_xys(x_train,y_train,args.step_size,args.window_size,action_name_dict)
-    dset_train = StepDataset(x_train,y_train,device='cuda',window_size=args.window_size,step_size=args.step_size)
+    dset_train = StepDataset(x_train,y_train,window_size=args.window_size,step_size=args.step_size)
     if len(subj_ids) <= 2: return dset_train, dset_train, selected_acts
 
     # else make val dset
@@ -175,7 +172,7 @@ def make_capture_dset_train_val(args,subj_ids):
     x_val = np.concatenate([np.load(f'datasets/capture24/np_data/P{three_digitify(s)}.npy') for s in val_ids])
     y_val = np.concatenate([np.load(f'datasets/capture24/np_data/P{three_digitify(s)}_labels.npy') for s in val_ids])
     x_val,y_val,selected_acts = preproc_xys(x_val,y_val,args.step_size,args.window_size,action_name_dict)
-    dset_val = StepDataset(x_val,y_val,device='cuda',window_size=args.window_size,step_size=args.step_size)
+    dset_val = StepDataset(x_val,y_val,window_size=args.window_size,step_size=args.step_size)
     return dset_train, dset_val, selected_acts
 
 def make_single_dset(args,subj_ids):
@@ -206,7 +203,7 @@ def chunked_up(x,step_size,window_size):
 def combine_dsets(dsets):
     xs = [d.x for d in dsets]
     ys = [d.y for d in dsets]
-    return ConcattedDataset(xs,ys,dsets[0].device,dsets[0].window_size,dsets[0].step_size)
+    return ConcattedDataset(xs,ys,dsets[0].window_size,dsets[0].step_size)
 
 def combine_dsets_old(dsets):
     processed_dset_xs = []
@@ -221,5 +218,5 @@ def combine_dsets_old(dsets):
     x = torch.cat(processed_dset_xs)
     y = torch.cat([dset.y for dset in dsets])
     assert len(x) == len(y)
-    combined = ChunkDataset(x,y,dsets[0].device)
+    combined = ChunkDataset(x,y)
     return combined
