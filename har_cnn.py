@@ -80,9 +80,30 @@ class HARLearner():
         self.total_train_time = 0
         self.total_umap_time = 0
         self.total_cluster_time = 0
+        self.total_align_time = 0
+        self.total_time = 0
 
         self.enc_opt = torch.optim.Adam(self.enc.parameters(),lr=ARGS.enc_lr)
         self.mlp_opt = torch.optim.Adam(self.mlp.parameters(),lr=ARGS.mlp_lr)
+
+    def express_times(self,file_path):
+        total_train_time = asMinutes(self.total_train_time)
+        total_umap_time = asMinutes(self.total_umap_time)
+        total_cluster_time = asMinutes(self.total_cluster_time)
+        total_align_time = asMinutes(self.total_align_time)
+        total_time = asMinutes(self.total_time)
+        if file_path is not 'none':
+            with open(file_path,'w') as f:
+                f.write(f'Total align time: {total_align_time}')
+                f.write(f'Total train time: {total_train_time}')
+                f.write(f'Total umap time: {total_umap_time}')
+                f.write(f'Total cluster time: {total_cluster_time}')
+                f.write(f'Total time: {total_time}')
+        print(f'Total align time: {total_align_time}')
+        print(f'Total train time: {total_train_time}')
+        print(f'Total umap time: {total_umap_time}')
+        print(f'Total cluster time: {total_cluster_time}')
+        print(f'Total time: {total_time}')
 
     def get_latents(self,dset):
         self.enc.eval()
@@ -300,21 +321,16 @@ class HARLearner():
                 preds_from_this_user.append(preds)
             preds_from_users_list.append(np.concatenate(preds_from_this_user))
             print([len(x) for x in preds_from_users_list])
-            total_align_time += time.time() - align_start_time
-            if ARGS.just_align_time: print(round(total_align_time,4))
+            self.total_align_time += time.time() - align_start_time
+            if ARGS.just_align_time: print(round(self.total_align_time,4))
         if ARGS.just_align_time:
-            print(f'Total align time: {total_align_time}'); sys.exit()
+            print(f'Total align time: {self.total_align_time}'); sys.exit()
         mega_ultra_preds = np.stack(preds_from_users_list)
         debabled_mega_ultra_preds = debable(mega_ultra_preds,'none')
         start_idxs = [sum([len(d) for d,sa in user_dsets[:i]]) for i in range(len(user_dsets)+1)]
         mlp_self_preds = [debabled_mega_ultra_preds[uid][start_idxs[uid]:start_idxs[uid+1]] for uid in range(len(user_dsets))]
         hmm_self_preds = [translate_labellings(sa,ta) for sa,ta in zip(self_preds,mlp_self_preds)]
         hmm_best_preds = [translate_labellings(sa,ta) for sa,ta in zip(self_best_preds,mlp_self_preds)]
-        total_train_time = asMinutes(self.total_train_time)
-        total_umap_time = asMinutes(self.total_umap_time)
-        total_cluster_time = asMinutes(self.total_cluster_time)
-        total_end_time = time.time()
-        total_time = asMinutes(total_end_time-total_start_time)
 
         check_dir(f'experiments/{args.exp_name}/hmm_self_preds')
         check_dir(f'experiments/{args.exp_name}/hmm_best_preds')
@@ -346,28 +362,21 @@ class HARLearner():
                 f.write(f'Mean cross acc: {mean_off_diagonal(cross_accs)}')
                 f.write(f'Mean cross ari: {mean_off_diagonal(cross_aris)}')
                 f.write(f'Mean cross nmi: {mean_off_diagonal(cross_nmis)}')
-            f.write(f'Total align time: {total_train_time}')
-            f.write(f'Total align time: {total_umap_time}')
-            f.write(f'Total align time: {total_cluster_time}')
-            f.write(f'Total align time: {total_align_time}')
-            f.write(f'Total train time: {total_time}')
             for relevant_arg in cl_args.RELEVANT_ARGS:
                 f.write(f"\n{relevant_arg}: {vars(ARGS).get(relevant_arg)}")
-            f.write(f'Total align time: {total_align_time}')
-            f.write(f'Total train time: {total_train_time}')
-            f.write(f'Total umap time: {total_umap_time}')
-            f.write(f'Total cluster time: {total_cluster_time}')
-            f.write(f'Total time: {total_time}')
-        print(f'Total align time: {total_align_time}')
-        print(f'Total train time: {total_train_time}')
-        print(f'Total umap time: {total_umap_time}')
-        print(f'Total cluster time: {total_cluster_time}')
-        print(f'Total time: {total_time}')
         if ARGS.all_subjs:
             dset_info_object = get_dataset_info_object(args.dset)
             np.save(f'datasets/{dset_info_object.dataset_dir_name}/full_ygt',np.concatenate([numpyify(d.y) for d,sa in user_dsets]))
 
+        self.express_times(results_file_path)
+
+
 def compute_and_save_metrics(preds_dict,gts,results_file_path):
+    """Computes acc,nmi,ari and meanf1 for a list of preds.
+
+    preds_dict: keys are names of preds, values are lists of preds, one for each user
+    """
+
     total_num_dpoints = sum([len(item) for item in gts])
     for preds_name, preds in preds_dict.items():
         accs = [accuracy(p,gt) for p, gt in zip(preds,gts)]
@@ -382,8 +391,6 @@ def compute_and_save_metrics(preds_dict,gts,results_file_path):
                     f.write(f"{preds_name} {metric_name}: {avg_score}")
                     f.write('\nAll {preds_name} {metric_name}:\n')
                     f.write(' '.join([str(s) for s in scores])+'\n')
-
-
 
 def mean_off_diagonal(mat):
     upper_sum = np.triu(mat,1).sum()
@@ -438,6 +445,7 @@ def main(args):
         har.full_train(dsets_by_id,args)
     elif args.train_type == 'cluster_as_single':
         print("CLUSTERING AS SINGLE DSET")
+        start_time = time.time()
         dset_train, selected_acts = make_single_dset(args,subj_ids)
         best_preds,preds,best_acc,best_nmi,best_ari,best_f1 = har.pseudo_label_cluster_meta_meta_loop(
                 dset_train,
@@ -446,6 +454,17 @@ def main(args):
                 args.num_pseudo_label_epochs,
                 args.prob_thresh,
                 selected_acts)
+        har.total_time = time.time() - start_time
+        results_file_path = f'experiments/{args.exp_name}/results.txt'
+        np.save(f"experiments/{args.exp_name}/best_preds", best_preds)
+        np.save(f"experiments/{args.exp_name}/preds", preds)
+        with open(results_file_path,'w') as f:
+            f.write(f"Best acc: {best_acc}")
+            f.write(f"Best nmi: {best_nmi}")
+            f.write(f"Best ari: {best_ari}")
+            f.write(f"Best f1: {best_f1}")
+        har.express_times(results_file_path)
+        compute_and_save_metrics({'One Big Preds':[preds]},[numpyify(dset_train.y)],results_file_path)
     elif args.train_type == 'cluster_individually':
         print("CLUSTERING EACH DSET SEPARATELY")
         accs, nmis, rand_idxs = [], [], []
