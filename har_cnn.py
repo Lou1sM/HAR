@@ -423,8 +423,8 @@ def main(args):
     y_strides = (1,1,1,1)
     max_pools = ((2,1),(2,1),(2,1),(2,1))
     num_classes = args.num_classes if args.num_classes != -1 else dset_info_object.num_classes
-    enc = EncByLayer(x_filters,y_filters,x_strides,y_strides,max_pools,show_shapes=args.show_shapes)
-    mlp = Var_BS_MLP(32,256,num_classes)
+    enc = EncByLayer(x_filters,y_filters,x_strides,y_strides,max_pools,show_shapes=args.show_shapes).cuda()
+    mlp = Var_BS_MLP(32,256,num_classes).cuda()
     if args.load_pretrained:
         enc.load_state_dict(torch.load('enc_pretrained.pt'))
     subj_ids = args.subj_ids
@@ -484,6 +484,5 @@ def main(args):
 if __name__ == "__main__":
 
     ARGS, need_umap = cl_args.get_cl_args()
-    torch.set_default_tensor_type('torch.cuda.FloatTensor')
     if need_umap: import umap
     main(ARGS)

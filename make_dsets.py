@@ -10,7 +10,6 @@ from pdb import set_trace
 from os.path import join
 
 
-torch.set_default_tensor_type('torch.cuda.FloatTensor')
 class ChunkDataset(data.Dataset):
     def __init__(self,x,y):
         self.x, self.y = x,y
@@ -44,7 +43,7 @@ class ConcattedDataset(data.Dataset):
 
 class StepDataset(data.Dataset):
     def __init__(self,x,y,window_size,step_size,transforms=[]):
-        self.x, self.y = x,y
+        self.x, self.y = x.cuda(),y.cuda()
         self.window_size = window_size
         self.step_size = step_size
         self.transforms = transforms
