@@ -1,4 +1,5 @@
 import sys
+from scipy import stats
 from hmmlearn import hmm
 from copy import deepcopy
 import os
@@ -331,8 +332,12 @@ class HARLearner():
         hmm_self_preds = [translate_labellings(sa,ta,preserve_sizes=True) for sa,ta in zip(self_preds,mlp_self_preds)]
         hmm_best_preds = [translate_labellings(sa,ta,preserve_sizes=True) for sa,ta in zip(self_best_preds,mlp_self_preds)]
         ygts = [numpyify(d.y) for d,sa in user_dsets]
-        if any([get_num_labels(a)==get_num_labels(b) and accuracy(a,y)>accuracy(b,y) for a,b,y in zip(hmm_self_preds,self_preds,ygts)]):set_trace()
         if any([get_num_labels(a)!=get_num_labels(b) for a,b in zip(hmm_self_preds,self_preds)]):set_trace()
+        most_com_lab = np.array([[stats.mode(numpyify(user_dsets[j][0].y)[self_preds[j]==i]).mode[0] for i in set(self_preds[j])] for j in range(len(self_preds))])
+        trans_acc = np.array([(most_com_lab==r).mean(axis=0) for r in most_com_lab]).mean()
+        results_file_path = f'experiments/{args.exp_name}/results.txt'
+        with open(results_file_path ,'w') as f: f.write(f'Trans acc: {trans_acc}')
+        print(f'Trans acc: {trans_acc}')
 
         check_dir(f'experiments/{args.exp_name}/hmm_self_preds')
         check_dir(f'experiments/{args.exp_name}/hmm_best_preds')
@@ -355,7 +360,6 @@ class HARLearner():
             exec(f"np.save('experiments/{args.exp_name}/{np_thing}',{np_thing})")
 
         scores_by_metric_name = {'self':self_preds,'self_best':self_best_preds,'hmm':hmm_self_preds,'hmm_best':hmm_best_preds,'mlp': mlp_self_preds}
-        results_file_path = f'experiments/{args.exp_name}/results.txt'
         compute_and_save_metrics(scores_by_metric_name,ygts,results_file_path)
 
         check_dir(f'experiments/{args.exp_name}/mlp_self_preds')
