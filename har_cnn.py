@@ -12,7 +12,7 @@ from torch.utils import data
 import cl_args
 from dl_utils.misc import asMinutes,check_dir
 from dl_utils.label_funcs import accuracy, mean_f1, debable, translate_labellings, get_num_labels, label_counts, dummy_labels, avoid_minus_ones_lf_wrapper,masked_mode,acc_by_label
-from dl_utils.tensor_funcs import noiseify, numpyify, cudify
+from dl_utils.tensor_funcs import noiseify, numpyify, cudify, mean_off_diagonal
 from make_dsets import make_single_dset, make_dsets_by_user
 from sklearn.metrics import normalized_mutual_info_score,adjusted_rand_score
 from project_config import get_dataset_info_object
@@ -298,7 +298,6 @@ class HARLearner():
         self_best_nmis = []
         self_preds = []
         self_best_preds = []
-        total_align_time = 0
         user_dsets = list(user_dsets_as_dict.values())
         for user_id, (user_dset, sa) in user_dsets_as_dict.items():
             preds_from_this_user = []
@@ -320,7 +319,7 @@ class HARLearner():
                 preds = self.val_on(other_user_dset,test=ARGS.test)
                 preds_from_this_user.append(preds)
             preds_from_users_list.append(np.concatenate(preds_from_this_user))
-            print([len(x) for x in preds_from_users_list])
+            print(self_best_accs)
             self.total_align_time += time.time() - align_start_time
             if ARGS.just_align_time: print(round(self.total_align_time,4))
         if ARGS.just_align_time:
@@ -329,8 +328,11 @@ class HARLearner():
         debabled_mega_ultra_preds = debable(mega_ultra_preds,'none')
         start_idxs = [sum([len(d) for d,sa in user_dsets[:i]]) for i in range(len(user_dsets)+1)]
         mlp_self_preds = [debabled_mega_ultra_preds[uid][start_idxs[uid]:start_idxs[uid+1]] for uid in range(len(user_dsets))]
-        hmm_self_preds = [translate_labellings(sa,ta) for sa,ta in zip(self_preds,mlp_self_preds)]
-        hmm_best_preds = [translate_labellings(sa,ta) for sa,ta in zip(self_best_preds,mlp_self_preds)]
+        hmm_self_preds = [translate_labellings(sa,ta,preserve_sizes=True) for sa,ta in zip(self_preds,mlp_self_preds)]
+        hmm_best_preds = [translate_labellings(sa,ta,preserve_sizes=True) for sa,ta in zip(self_best_preds,mlp_self_preds)]
+        ygts = [numpyify(d.y) for d,sa in user_dsets]
+        if any([get_num_labels(a)==get_num_labels(b) and accuracy(a,y)>accuracy(b,y) for a,b,y in zip(hmm_self_preds,self_preds,ygts)]):set_trace()
+        if any([get_num_labels(a)!=get_num_labels(b) for a,b in zip(hmm_self_preds,self_preds)]):set_trace()
 
         check_dir(f'experiments/{args.exp_name}/hmm_self_preds')
         check_dir(f'experiments/{args.exp_name}/hmm_best_preds')
@@ -354,7 +356,7 @@ class HARLearner():
 
         scores_by_metric_name = {'self':self_preds,'self_best':self_best_preds,'hmm':hmm_self_preds,'hmm_best':hmm_best_preds,'mlp': mlp_self_preds}
         results_file_path = f'experiments/{args.exp_name}/results.txt'
-        compute_and_save_metrics(scores_by_metric_name,[numpyify(d.y) for d,sa in user_dsets],results_file_path)
+        compute_and_save_metrics(scores_by_metric_name,ygts,results_file_path)
 
         check_dir(f'experiments/{args.exp_name}/mlp_self_preds')
         with open(results_file_path,'w') as f:
@@ -368,6 +370,7 @@ class HARLearner():
             dset_info_object = get_dataset_info_object(args.dset)
             np.save(f'datasets/{dset_info_object.dataset_dir_name}/full_ygt',np.concatenate([numpyify(d.y) for d,sa in user_dsets]))
 
+        self.total_time = time.time() - total_start_time
         self.express_times(results_file_path)
 
 
@@ -391,24 +394,6 @@ def compute_and_save_metrics(preds_dict,gts,results_file_path):
                     f.write(f"{preds_name} {metric_name}: {avg_score}")
                     f.write('\nAll {preds_name} {metric_name}:\n')
                     f.write(' '.join([str(s) for s in scores])+'\n')
-
-def mean_off_diagonal(mat):
-    upper_sum = np.triu(mat,1).sum()
-    lower_sum = np.tril(mat,-1).sum()
-    num_el = np.prod(mat.shape) - mat.shape[0]
-    return (upper_sum + lower_sum)/num_el
-
-def stratified_sample_mask(population_length, sample_frac):
-    if sample_frac == 0:
-        sample_idx = np.array([], dtype=np.int)
-    elif sample_frac <= 0.5:
-        sample_idx = np.arange(population_length, step=int(1/sample_frac))
-    else:
-        non_sample_idx = np.arange(population_length, step=int(1/(1-sample_frac)))
-        sample_idx = np.delete(np.arange(population_length),non_sample_idx)
-    sample_mask = np.zeros(population_length)
-    sample_mask[sample_idx] = 1
-    return sample_mask
 
 def main(args):
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
