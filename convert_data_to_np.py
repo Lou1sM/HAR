@@ -208,6 +208,7 @@ if __name__ == "__main__":
             os.makedirs(np_dir)
 
         for filename in os.listdir(data_dir):
+            if filename == 'dataset manual.pdf': continue
             if not filename.split('_')[1].startswith('ideal'):
                 continue
             with open(join(data_dir,filename)) as f: xy = f.readlines()

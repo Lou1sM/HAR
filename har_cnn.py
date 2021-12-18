@@ -12,7 +12,7 @@ import time
 from torch.utils import data
 import cl_args
 from dl_utils.misc import asMinutes,check_dir
-from dl_utils.label_funcs import accuracy, mean_f1, debable, translate_labellings, get_num_labels, label_counts, dummy_labels, avoid_minus_ones_lf_wrapper,masked_mode,acc_by_label
+from dl_utils.label_funcs import accuracy, mean_f1, debable, translate_labellings, get_num_labels, label_counts, dummy_labels, avoid_minus_ones_lf_wrapper,masked_mode,acc_by_label, get_trans_dict
 from dl_utils.tensor_funcs import noiseify, numpyify, cudify, mean_off_diagonal
 from make_dsets import make_single_dset, make_dsets_by_user
 from sklearn.metrics import normalized_mutual_info_score,adjusted_rand_score
@@ -326,35 +326,50 @@ class HARLearner():
         if ARGS.just_align_time:
             print(f'Total align time: {self.total_align_time}'); sys.exit()
         mega_ultra_preds = np.stack(preds_from_users_list)
-        debabled_mega_ultra_preds = debable(mega_ultra_preds,'none')
         start_idxs = [sum([len(d) for d,sa in user_dsets[:i]]) for i in range(len(user_dsets)+1)]
-        mlp_self_preds = [debabled_mega_ultra_preds[uid][start_idxs[uid]:start_idxs[uid+1]] for uid in range(len(user_dsets))]
+        target_row = mega_ultra_preds[0]
+        mlp_self_preds = []
+        for i,row in enumerate(mega_ultra_preds):
+            s=np.concatenate([row[0:start_idxs[1]], row[start_idxs[i]:start_idxs[i+1]]])
+            t=np.concatenate([target_row[0:start_idxs[1]], target_row[start_idxs[i]:start_idxs[i+1]]])
+            translated = s[start_idxs[1]:]
+            mlp_self_preds.append(translated)
+        mlp_self_preds = np.array(mlp_self_preds)
+        debabled_mega_ultra_preds = debable(mega_ultra_preds,'none')
+        mlp_self_preds_old = [debabled_mega_ultra_preds[uid][start_idxs[uid]:start_idxs[uid+1]] for uid in range(len(user_dsets))]
         hmm_self_preds = [translate_labellings(sa,ta,preserve_sizes=True) for sa,ta in zip(self_preds,mlp_self_preds)]
+        hmm_self_preds_old = [translate_labellings(sa,ta,preserve_sizes=True) for sa,ta in zip(self_preds,mlp_self_preds_old)]
         hmm_best_preds = [translate_labellings(sa,ta,preserve_sizes=True) for sa,ta in zip(self_best_preds,mlp_self_preds)]
-        ygts = [numpyify(d.y) for d,sa in user_dsets]
-        if any([get_num_labels(a)!=get_num_labels(b) for a,b in zip(hmm_self_preds,self_preds)]):set_trace()
-        most_com_lab = np.array([[stats.mode(numpyify(user_dsets[j][0].y)[self_preds[j]==i]).mode[0] for i in set(self_preds[j])] for j in range(len(self_preds))])
-        trans_acc = np.array([(most_com_lab==r).mean(axis=0) for r in most_com_lab]).mean()
-        results_file_path = f'experiments/{args.exp_name}/results.txt'
-        with open(results_file_path ,'w') as f: f.write(f'Trans acc: {trans_acc}')
-        print(f'Trans acc: {trans_acc}')
-
         check_dir(f'experiments/{args.exp_name}/hmm_self_preds')
         check_dir(f'experiments/{args.exp_name}/hmm_best_preds')
         check_dir(f'experiments/{args.exp_name}/mlp_self_preds')
-        np.save(f'experiments/{args.exp_name}/debabled_mega_ultra_preds',debabled_mega_ultra_preds)
+        #np.save(f'experiments/{args.exp_name}/debabled_mega_ultra_preds',debabled_mega_ultra_preds)
+        np.save(f'experiments/{args.exp_name}/mega_ultra_preds',mega_ultra_preds)
         for uid, hsp in zip(user_dsets_as_dict.keys(),hmm_self_preds):
             np.save(f'experiments/{args.exp_name}/hmm_self_preds/{uid}',hsp)
         for uid, msp in zip(user_dsets_as_dict.keys(),mlp_self_preds):
             np.save(f'experiments/{args.exp_name}/mlp_self_preds/{uid}',msp)
         for uid, hbp in zip(user_dsets_as_dict.keys(),hmm_best_preds):
             np.save(f'experiments/{args.exp_name}/hmm_best_preds/{uid}',hbp)
-        np.save(f'experiments/{args.exp_name}/debabled_mega_ultra_preds',debabled_mega_ultra_preds)
+        ygts = [numpyify(d.y) for d,sa in user_dsets]
+        if any([get_num_labels(a)!=get_num_labels(b) for a,b in zip(hmm_self_preds,self_preds)]):set_trace()
+        def test_trans_acc(transed_preds):
+            trans_dicts = [get_trans_dict(transed_preds[i],numpyify(user_dsets[i][0].y))[0] for i in range(len(hmm_self_preds))]
+            nc = get_dataset_info_object(args.dset).num_classes
+            ordered_targs = np.array([[d[i] for i in sorted(d.keys())] for d in trans_dicts if len(d)==nc+1])
+            return np.array([ordered_targs==r for r in ordered_targs]).mean()
+        trans_acc_new = test_trans_acc(hmm_self_preds)
+        trans_acc_old = test_trans_acc(hmm_self_preds_old)
+        results_file_path = f'experiments/{args.exp_name}/results.txt'
+        with open(results_file_path ,'w') as f: f.write(f'Trans acc new: {trans_acc_new}')
+        print(f'Trans acc_new: {trans_acc_new}')
+        print(f'Trans acc_old: {trans_acc_old}')
+
         np_things = ['debabled_mega_ultra_preds','self_accs','self_f1s','self_aris','self_nmis','self_best_accs','self_best_f1s','self_best_aris','self_best_nmis']
         if args.compute_cross_metrics:
-            cross_accs = np.array([[accuracy(debabled_mega_ultra_preds[pred_id][start_idxs[target_id]:start_idxs[target_id+1]],numpyify(user_dsets[target_id][0].y)) for target_id in range(len(user_dsets))] for pred_id in range(len(user_dsets))])
-            cross_aris = np.array([[rari(debabled_mega_ultra_preds[pred_id][start_idxs[target_id]:start_idxs[target_id+1]],numpyify(user_dsets[target_id][0].y)) for target_id in range(len(user_dsets))] for pred_id in range(len(user_dsets))])
-            cross_nmis = np.array([[rnmi(debabled_mega_ultra_preds[pred_id][start_idxs[target_id]:start_idxs[target_id+1]],numpyify(user_dsets[target_id][0].y)) for target_id in range(len(user_dsets))] for pred_id in range(len(user_dsets))])
+            cross_accs = np.array([[accuracy(mega_ultra_preds[pred_id][start_idxs[target_id]:start_idxs[target_id+1]],numpyify(user_dsets[target_id][0].y)) for target_id in range(len(user_dsets))] for pred_id in range(len(user_dsets))])
+            cross_aris = np.array([[rari(mega_ultra_preds[pred_id][start_idxs[target_id]:start_idxs[target_id+1]],numpyify(user_dsets[target_id][0].y)) for target_id in range(len(user_dsets))] for pred_id in range(len(user_dsets))])
+            cross_nmis = np.array([[rnmi(mega_ultra_preds[pred_id][start_idxs[target_id]:start_idxs[target_id+1]],numpyify(user_dsets[target_id][0].y)) for target_id in range(len(user_dsets))] for pred_id in range(len(user_dsets))])
             np_things += ['cross_accs','cross_aris','cross_nmis']
         for np_thing in np_things:
             exec(f"np.save('experiments/{args.exp_name}/{np_thing}',{np_thing})")
