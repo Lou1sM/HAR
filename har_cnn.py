@@ -119,7 +119,7 @@ class HARLearner():
         collected_latents = np.concatenate(collected_latents,axis=0)
         return collected_latents
 
-    def train_on(self,dset,num_epochs,multiplicative_mask='none',lf=None,compute_acc=True,reinit=True,rlmbda=0,custom_sampler='none',noise=0.):
+    def train_on(self,dset,num_epochs,multiplicative_mask='none',lf=None,compute_acc=True,reinit=False,rlmbda=0,custom_sampler='none',noise=0.):
         if reinit: self.reinit_nets()
         self.enc.train()
         self.mlp.train()
@@ -224,23 +224,26 @@ class HARLearner():
                     c.fit(umapped_latents)
                     new_pred_labels = c.predict(umapped_latents)
                     new_pred_probs = c.predict_proba(umapped_latents)
+                if ARGS.show_transitions:
+                    num_transitions = len([x for i,x in enumerate(new_pred_labels) if new_pred_labels[i-1]!=x])
+                    print('num transitions', num_transitions)
 
                 self.total_cluster_time += time.time() - start_time
-                if ARGS.ablate_label_gather or ARGS.test:
-                    mask = np.ones(len(dset.y)).astype(np.bool)
-                    mask_to_use = mask
-                else:
-                    mask = new_pred_probs.max(axis=1) >= prob_thresh
-                    if meta_pivot_pred_labels is not 'none':
-                        new_pred_labels = translate_labellings(new_pred_labels,meta_pivot_pred_labels,subsample_size=30000)
-                    elif epoch_num > 0:
-                        new_pred_labels = translate_labellings(new_pred_labels,old_pred_labels,subsample_size=30000)
-                    if epoch_num > 0:
-                        mask2 = new_pred_labels==old_pred_labels
-                        mask = mask*mask2
-                        assert (new_pred_labels[mask]==old_pred_labels[mask]).all()
-                    super_mask*=mask
-                    mask_to_use = (mask+super_mask)/2
+            if ARGS.ablate_label_gather or ARGS.test:
+                mask = np.ones(len(dset.y)).astype(np.bool)
+                mask_to_use = mask
+            else:
+                mask = new_pred_probs.max(axis=1) >= prob_thresh
+                if meta_pivot_pred_labels is not 'none':
+                    new_pred_labels = translate_labellings(new_pred_labels,meta_pivot_pred_labels,subsample_size=30000)
+                elif epoch_num > 0:
+                    new_pred_labels = translate_labellings(new_pred_labels,old_pred_labels,subsample_size=30000)
+                if epoch_num > 0:
+                    mask2 = new_pred_labels==old_pred_labels
+                    mask = mask*mask2
+                    assert (new_pred_labels[mask]==old_pred_labels[mask]).all()
+                super_mask*=mask
+                mask_to_use = mask/2+super_mask/2
             pseudo_label_dset = deepcopy(dset)
             pseudo_label_dset.y = cudify(new_pred_labels)
             mlp_preds = self.train_on(pseudo_label_dset,multiplicative_mask=cudify(mask_to_use),num_epochs=num_pseudo_label_epochs)
@@ -436,9 +439,8 @@ def compute_and_save_metrics(preds_dict,gts,results_file_path):
 def main(args):
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
     dset_info_object = get_dataset_info_object(args.dset)
-    nc = dset_info_object.num_channels
     x_filters = (50,40,7,4)
-    y_filters = (nc,1,1,1)
+    y_filters = (1,1,1,dset_info_object.num_channels)
     x_strides = (2,2,1,1)
     y_strides = (1,1,1,1)
     max_pools = ((2,1),(2,1),(2,1),(2,1))

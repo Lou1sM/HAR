@@ -14,7 +14,7 @@ def get_cl_args():
     parser.add_argument('--all_subjs',action='store_true')
     parser.add_argument('--batch_size_train',type=int,default=128)
     parser.add_argument('--batch_size_val',type=int,default=128)
-    parser.add_argument('--clusterer',type=str,choices=['HMM','GMM'])
+    parser.add_argument('--clusterer',type=str,choices=['HMM','GMM'],default='HMM')
     parser.add_argument('--compute_cross_metrics',action='store_true')
     parser.add_argument('--dec_lr',type=float,default=1e-3)
     parser.add_argument('--dset',type=str,default='PAMAP',choices=dset_options)
@@ -34,6 +34,7 @@ def get_cl_args():
     parser.add_argument('--prob_thresh',type=float,default=.95)
     parser.add_argument('--rlmbda',type=float,default=.1)
     parser.add_argument('--short_epochs',action='store_true')
+    parser.add_argument('--show_transitions',action='store_true')
     parser.add_argument('--step_size',type=int,default=5)
     parser.add_argument('--test','-t',action='store_true')
     parser.add_argument('--train_type',type=str,choices=training_type_options,default='full')
@@ -65,4 +66,4 @@ def get_cl_args():
         print(f"You have specified non-existent ids: {bad_ids}\nExistent ids are {all_possible_ids}"); sys.exit()
     return ARGS, need_umap
 
-RELEVANT_ARGS = ['batch_size','dset','enc_lr','dec_lr','frac_gt_labels','mlp_lr','no_umap','noise','num_meta_epochs','num_meta_meta_epochs','num_pseudo_label_epochs','prob_thresh','rlmbda']
+RELEVANT_ARGS = ['batch_size','clusterer','dset','enc_lr','dec_lr','frac_gt_labels','mlp_lr','no_umap','noise','num_meta_epochs','num_meta_meta_epochs','num_pseudo_label_epochs','prob_thresh','rlmbda']
