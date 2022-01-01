@@ -5,7 +5,8 @@ import torch
 import project_config
 from scipy import stats
 from torch.utils import data
-from dl_utils import label_funcs
+#from dl_utils import label_funcs
+import label_funcs_tmp
 from pdb import set_trace
 from os.path import join
 
@@ -47,6 +48,8 @@ class StepDataset(data.Dataset):
         self.window_size = window_size
         self.step_size = step_size
         self.transforms = transforms
+        self.position = None
+        self.ensemble_size = None
         for transform in transforms:
             self.x = transform(self.x)
     def __len__(self): return (len(self.x)-self.window_size)//self.step_size + 1
@@ -55,14 +58,10 @@ class StepDataset(data.Dataset):
         batch_y = self.y[idx]
         return batch_x, batch_y, idx
 
-    def temporal_consistency_loss(self,sequence):
-        total_loss = 0
-        for start_idx in range(len(sequence)-self.window_size):
-            window = sequence[start_idx:start_idx+self.window_size]
-            mu = window.mean(axis=0)
-            window_var = sum([(item-mu) for item in self.window])/self.window_size
-            if window_var < self.split_thresh: total_loss += window_var
-        return total_loss
+    def put_in_ensemble(self,position,ensemble_size):
+        self.y += ensemble_size*position
+        self.position = position
+        self.ensemble_size = ensemble_size
 
 def preproc_xys(x,y,step_size,window_size,dset_info_object,subj_ids):
     ids_string = 'all' if set(subj_ids) == set(dset_info_object.possible_subj_ids) else "-".join(subj_ids)
@@ -84,7 +83,7 @@ def preproc_xys(x,y,step_size,window_size,dset_info_object,subj_ids):
         mode_labels = np.array([stats.mode(y[w*step_size:w*step_size + window_size]).mode[0] for w in range(num_windows)])
         selected_ids = set(mode_labels)
         selected_acts = [dset_info_object.action_name_dict[act_id] for act_id in selected_ids]
-        mode_labels, trans_dict, changed = label_funcs.compress_labels(mode_labels)
+        mode_labels, trans_dict, changed = label_funcs_tmp.compress_labels(mode_labels)
         assert len(selected_acts) == len(set(mode_labels))
         x = torch.tensor(x).float()
         y = torch.tensor(mode_labels).float()

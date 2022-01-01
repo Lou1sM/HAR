@@ -2,7 +2,9 @@ from pdb import set_trace
 from scipy.fft import fft
 from scipy import stats
 from mpmath import mp, mpf
-from dl_utils import misc, label_funcs
+#from dl_utils import misc, label_funcs
+from dl_utils import misc
+import label_funcs_tmp
 import os
 from os.path import join
 import sys
@@ -191,7 +193,7 @@ if __name__ == "__main__":
             mode_object = stats.mode(np.stack(equalized_label_arrays,axis=1),axis=1)
             mode_labels = mode_object.mode[:,0]
             # Print how many windows contained just 1 label, how many 2 etc.
-            print('Agreement in labels:',label_funcs.label_counts(mode_object.count[:,0]))
+            print('Agreement in labels:',label_funcs_tmp.label_counts(mode_object.count[:,0]))
             certains = (mode_object.count == 4)[:,0]
             user_fn = f'{user_idx}.npy'
             misc.np_save(total_user_array,np_dir,user_fn)

@@ -12,10 +12,12 @@ import time
 from torch.utils import data
 import cl_args
 from dl_utils.misc import asMinutes,check_dir
-from dl_utils.label_funcs import accuracy, mean_f1, debable, translate_labellings, get_num_labels, label_counts, dummy_labels, avoid_minus_ones_lf_wrapper,masked_mode,acc_by_label, get_trans_dict
+#from dl_utils.label_funcs import accuracy, mean_f1, debable, translate_labellings, get_num_labels, label_counts, dummy_labels, avoid_minus_ones_lf_wrapper,masked_mode,acc_by_label, get_trans_dict
+from label_funcs_tmp import accuracy, mean_f1, debable, translate_labellings, get_num_labels, label_counts, dummy_labels, avoid_minus_ones_lf_wrapper,masked_mode,acc_by_label, get_trans_dict
 from dl_utils.tensor_funcs import noiseify, numpyify, cudify, mean_off_diagonal
 from make_dsets import make_single_dset, make_dsets_by_user
 from sklearn.metrics import normalized_mutual_info_score,adjusted_rand_score
+from sklearn.mixture import GaussianMixture
 from project_config import get_dataset_info_object
 
 rari = lambda x,y: round(adjusted_rand_score(x,y),4)
@@ -94,12 +96,12 @@ class HARLearner():
         total_align_time = asMinutes(self.total_align_time)
         total_time = asMinutes(self.total_time)
         if file_path is not 'none':
-            with open(file_path,'w') as f:
-                f.write(f'Total align time: {total_align_time}')
-                f.write(f'Total train time: {total_train_time}')
-                f.write(f'Total umap time: {total_umap_time}')
-                f.write(f'Total cluster time: {total_cluster_time}')
-                f.write(f'Total time: {total_time}')
+            with open(file_path,'a') as f:
+                f.write(f'Total align time: {total_align_time}\n')
+                f.write(f'Total train time: {total_train_time}\n')
+                f.write(f'Total umap time: {total_umap_time}\n')
+                f.write(f'Total cluster time: {total_cluster_time}\n')
+                f.write(f'Total time: {total_time}\n')
         print(f'Total align time: {total_align_time}')
         print(f'Total train time: {total_train_time}')
         print(f'Total umap time: {total_umap_time}')
@@ -198,38 +200,49 @@ class HARLearner():
                 if additional > 0:
                     new_pred_labels = np.concatenate((new_pred_labels,np.ones(additional)))
                 new_pred_labels = new_pred_labels.astype(np.long)
-                mask = np.ones(len(dset.y)).astype(np.bool)
                 old_pred_labels = new_pred_labels
             else:
                 latents = self.get_latents(dset)
                 start_time = time.time()
                 umapped_latents = latents if ARGS.no_umap else umap.UMAP(min_dist=0,n_neighbors=60,n_components=2,random_state=42).fit_transform(latents.squeeze())
                 self.total_umap_time += time.time() - start_time
+
                 start_time = time.time()
-                model = hmm.GaussianHMM(self.num_classes,'full')
-                model.params = 'mc'
-                model.init_params = 'mc'
-                model.startprob_ = np.ones(self.num_classes)/self.num_classes
-                num_action_blocks = len([item for idx,item in enumerate(dset.y) if dset.y[idx-1] != item])
-                prob_new_action = num_action_blocks/len(dset)
-                model.transmat_ = (np.eye(self.num_classes) * (1-prob_new_action)) + (np.ones((self.num_classes,self.num_classes))*prob_new_action/self.num_classes)
-                model.fit(umapped_latents)
-                new_pred_labels = model.predict(umapped_latents)
-                new_pred_probs = model.predict_proba(umapped_latents)
+                if ARGS.clusterer == 'HMM':
+                    model = hmm.GaussianHMM(self.num_classes,'full')
+                    model.params = 'mc'
+                    model.init_params = 'mc'
+                    model.startprob_ = np.ones(self.num_classes)/self.num_classes
+                    num_action_blocks = len([item for idx,item in enumerate(dset.y) if dset.y[idx-1] != item])
+                    prob_new_action = num_action_blocks/len(dset)
+                    model.transmat_ = (np.eye(self.num_classes) * (1-prob_new_action)) + (np.ones((self.num_classes,self.num_classes))*prob_new_action/self.num_classes)
+                    model.fit(umapped_latents)
+                    new_pred_labels = model.predict(umapped_latents)
+                    new_pred_probs = model.predict_proba(umapped_latents)
+                elif ARGS.clusterer == 'GMM':
+                    c = GaussianMixture(n_components=self.num_classes,n_init=5)
+                    c.fit(umapped_latents)
+                    new_pred_labels = c.predict(umapped_latents)
+                    new_pred_probs = c.predict_proba(umapped_latents)
+
                 self.total_cluster_time += time.time() - start_time
-                mask = new_pred_probs.max(axis=1) >= prob_thresh
-                if meta_pivot_pred_labels is not 'none':
-                    new_pred_labels = translate_labellings(new_pred_labels,meta_pivot_pred_labels,subsample_size=30000)
-                elif epoch_num > 0:
-                    new_pred_labels = translate_labellings(new_pred_labels,old_pred_labels,subsample_size=30000)
+                if ARGS.ablate_label_gather or ARGS.test:
+                    mask = np.ones(len(dset.y)).astype(np.bool)
+                    mask_to_use = mask
+                else:
+                    mask = new_pred_probs.max(axis=1) >= prob_thresh
+                    if meta_pivot_pred_labels is not 'none':
+                        new_pred_labels = translate_labellings(new_pred_labels,meta_pivot_pred_labels,subsample_size=30000)
+                    elif epoch_num > 0:
+                        new_pred_labels = translate_labellings(new_pred_labels,old_pred_labels,subsample_size=30000)
+                    if epoch_num > 0:
+                        mask2 = new_pred_labels==old_pred_labels
+                        mask = mask*mask2
+                        assert (new_pred_labels[mask]==old_pred_labels[mask]).all()
+                    super_mask*=mask
+                    mask_to_use = (mask+super_mask)/2
             pseudo_label_dset = deepcopy(dset)
             pseudo_label_dset.y = cudify(new_pred_labels)
-            if epoch_num > 0:
-                mask2 = new_pred_labels==old_pred_labels
-                mask = mask*mask2
-                assert (new_pred_labels[mask]==old_pred_labels[mask]).all()
-            super_mask*=mask
-            mask_to_use = (mask+super_mask)/2
             mlp_preds = self.train_on(pseudo_label_dset,multiplicative_mask=cudify(mask_to_use),num_epochs=num_pseudo_label_epochs)
             y_np = numpyify(dset.y)
             if ARGS.verbose:
@@ -300,6 +313,8 @@ class HARLearner():
         self_preds = []
         self_best_preds = []
         user_dsets = list(user_dsets_as_dict.values())
+        ygts = [numpyify(d.y) for d,sa in user_dsets]
+        check_dir(f'experiments/{ARGS.exp_name}')
         for user_id, (user_dset, sa) in user_dsets_as_dict.items():
             preds_from_this_user = []
             if not ARGS.just_align_time:
@@ -320,50 +335,54 @@ class HARLearner():
                 preds = self.val_on(other_user_dset,test=ARGS.test)
                 preds_from_this_user.append(preds)
             preds_from_users_list.append(np.concatenate(preds_from_this_user))
+            np.save(f'experiments/{ARGS.exp_name}/in_progress_preds',np.array(preds_from_users_list))
             print(self_best_accs)
             self.total_align_time += time.time() - align_start_time
             if ARGS.just_align_time: print(round(self.total_align_time,4))
         if ARGS.just_align_time:
             print(f'Total align time: {self.total_align_time}'); sys.exit()
+        pivot_dset, _ = make_single_dset(args,args.subj_ids)
         mega_ultra_preds = np.stack(preds_from_users_list)
         start_idxs = [sum([len(d) for d,sa in user_dsets[:i]]) for i in range(len(user_dsets)+1)]
         target_row = mega_ultra_preds[0]
-        mlp_self_preds = []
+        hmm_self_preds_pairs = []
         for i,row in enumerate(mega_ultra_preds):
-            s=np.concatenate([row[0:start_idxs[1]], row[start_idxs[i]:start_idxs[i+1]]])
-            t=np.concatenate([target_row[0:start_idxs[1]], target_row[start_idxs[i]:start_idxs[i+1]]])
-            translated = s[start_idxs[1]:]
-            mlp_self_preds.append(translated)
-        mlp_self_preds = np.array(mlp_self_preds)
+            t=np.concatenate([self_best_preds[0], target_row[start_idxs[i]:start_idxs[i+1]]])
+            s=np.concatenate([row[0:start_idxs[1]], self_best_preds[i]])
+            translated = translate_labellings(s,t,preserve_sizes=True)[start_idxs[1]:]
+            hmm_self_preds_pairs.append(translated)
         debabled_mega_ultra_preds = debable(mega_ultra_preds,'none')
-        mlp_self_preds_old = [debabled_mega_ultra_preds[uid][start_idxs[uid]:start_idxs[uid+1]] for uid in range(len(user_dsets))]
-        hmm_self_preds = [translate_labellings(sa,ta,preserve_sizes=True) for sa,ta in zip(self_preds,mlp_self_preds)]
-        hmm_self_preds_old = [translate_labellings(sa,ta,preserve_sizes=True) for sa,ta in zip(self_preds,mlp_self_preds_old)]
+        mlp_self_preds = [debabled_mega_ultra_preds[uid][start_idxs[uid]:start_idxs[uid+1]] for uid in range(len(user_dsets))]
+        hmm_self_preds_full = [translate_labellings(sa,ta,preserve_sizes=True) for sa,ta in zip(self_preds,mlp_self_preds)]
         hmm_best_preds = [translate_labellings(sa,ta,preserve_sizes=True) for sa,ta in zip(self_best_preds,mlp_self_preds)]
+        print('legit untranslated acc:', accuracy(np.concatenate(self_best_preds),np.concatenate(ygts)))
+        print('legit full acc:', accuracy(np.concatenate(hmm_self_preds_full),np.concatenate(ygts)))
+        print('legit pairs acc:', accuracy(np.concatenate(hmm_self_preds_pairs),np.concatenate(ygts)))
+        print('unlegit untranslated acc:', np.array([accuracy(p,y) for p,y in zip(self_best_preds,ygts)]).mean())
+        print('unlegit full acc:', np.array([accuracy(p,y) for p,y in zip(hmm_self_preds_full,ygts)]).mean())
+        print('unlegit pairs acc:', np.array([accuracy(p,y) for p,y in zip(hmm_self_preds_pairs,ygts)]).mean())
         check_dir(f'experiments/{args.exp_name}/hmm_self_preds')
         check_dir(f'experiments/{args.exp_name}/hmm_best_preds')
         check_dir(f'experiments/{args.exp_name}/mlp_self_preds')
-        #np.save(f'experiments/{args.exp_name}/debabled_mega_ultra_preds',debabled_mega_ultra_preds)
         np.save(f'experiments/{args.exp_name}/mega_ultra_preds',mega_ultra_preds)
+        hmm_self_preds = hmm_self_preds_full
         for uid, hsp in zip(user_dsets_as_dict.keys(),hmm_self_preds):
             np.save(f'experiments/{args.exp_name}/hmm_self_preds/{uid}',hsp)
         for uid, msp in zip(user_dsets_as_dict.keys(),mlp_self_preds):
             np.save(f'experiments/{args.exp_name}/mlp_self_preds/{uid}',msp)
         for uid, hbp in zip(user_dsets_as_dict.keys(),hmm_best_preds):
             np.save(f'experiments/{args.exp_name}/hmm_best_preds/{uid}',hbp)
-        ygts = [numpyify(d.y) for d,sa in user_dsets]
         if any([get_num_labels(a)!=get_num_labels(b) for a,b in zip(hmm_self_preds,self_preds)]):set_trace()
         def test_trans_acc(transed_preds):
             trans_dicts = [get_trans_dict(transed_preds[i],numpyify(user_dsets[i][0].y))[0] for i in range(len(hmm_self_preds))]
             nc = get_dataset_info_object(args.dset).num_classes
             ordered_targs = np.array([[d[i] for i in sorted(d.keys())] for d in trans_dicts if len(d)==nc+1])
             return np.array([ordered_targs==r for r in ordered_targs]).mean()
-        trans_acc_new = test_trans_acc(hmm_self_preds)
-        trans_acc_old = test_trans_acc(hmm_self_preds_old)
+        trans_acc_full = test_trans_acc(hmm_self_preds_full)
+        trans_acc_pairs = test_trans_acc(hmm_self_preds_pairs)
         results_file_path = f'experiments/{args.exp_name}/results.txt'
-        with open(results_file_path ,'w') as f: f.write(f'Trans acc new: {trans_acc_new}')
-        print(f'Trans acc_new: {trans_acc_new}')
-        print(f'Trans acc_old: {trans_acc_old}')
+        print(f'Trans acc_full: {trans_acc_full}')
+        print(f'Trans acc_pairs: {trans_acc_pairs}')
 
         np_things = ['debabled_mega_ultra_preds','self_accs','self_f1s','self_aris','self_nmis','self_best_accs','self_best_f1s','self_best_aris','self_best_nmis']
         if args.compute_cross_metrics:
@@ -378,7 +397,7 @@ class HARLearner():
         compute_and_save_metrics(scores_by_metric_name,ygts,results_file_path)
 
         check_dir(f'experiments/{args.exp_name}/mlp_self_preds')
-        with open(results_file_path,'w') as f:
+        with open(results_file_path,'a') as f:
             if args.compute_cross_metrics:
                 f.write(f'Mean cross acc: {mean_off_diagonal(cross_accs)}')
                 f.write(f'Mean cross ari: {mean_off_diagonal(cross_aris)}')
@@ -409,16 +428,17 @@ def compute_and_save_metrics(preds_dict,gts,results_file_path):
             avg_score = sum([s*len(gt) for s,gt in zip(scores, gts)])/total_num_dpoints
             print(f"{preds_name} {metric_name}: {avg_score}")
             if results_file_path != 'none':
-                with open(results_file_path,'w') as f:
+                with open(results_file_path,'a') as f:
                     f.write(f"{preds_name} {metric_name}: {avg_score}")
-                    f.write('\nAll {preds_name} {metric_name}:\n')
+                    f.write(f'\nAll {preds_name} {metric_name}:\n')
                     f.write(' '.join([str(s) for s in scores])+'\n')
 
 def main(args):
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
     dset_info_object = get_dataset_info_object(args.dset)
+    nc = dset_info_object.num_channels
     x_filters = (50,40,7,4)
-    y_filters = (1,1,1,dset_info_object.num_channels)
+    y_filters = (nc,1,1,1)
     x_strides = (2,2,1,1)
     y_strides = (1,1,1,1)
     max_pools = ((2,1),(2,1),(2,1),(2,1))
@@ -435,7 +455,7 @@ def main(args):
         dset_train, selected_acts = make_single_dset(args,subj_ids)
         num_ftrs = dset_train.x.shape[-1]
         print(num_ftrs)
-        lat = enc(torch.ones((2,1,512,num_ftrs)))
+        lat = enc(torch.ones((2,1,512,num_ftrs),device='cuda'))
     elif args.train_type == 'full':
         dsets_by_id = make_dsets_by_user(args,subj_ids)
         bad_ids = []
@@ -462,7 +482,7 @@ def main(args):
         results_file_path = f'experiments/{args.exp_name}/results.txt'
         np.save(f"experiments/{args.exp_name}/best_preds", best_preds)
         np.save(f"experiments/{args.exp_name}/preds", preds)
-        with open(results_file_path,'w') as f:
+        with open(results_file_path,'a') as f:
             f.write(f"Best acc: {best_acc}")
             f.write(f"Best nmi: {best_nmi}")
             f.write(f"Best ari: {best_ari}")
@@ -474,7 +494,7 @@ def main(args):
         accs, nmis, rand_idxs = [], [], []
         for user_id, (dset,sa) in enumerate(dsets_by_id):
             print("clustering", user_id)
-            acc, nmi, rand_idx = har.pseudo_label_cluster_meta_meta_loop(dset,args.num_meta_meta_epochs,args.num_meta_epochs,args.num_pseudo_label_epochs,args.prob_thresh,selected_acts)
+            best_preds_so_far,preds,best_acc,best_nmi,best_ari,best_f1 = har.pseudo_label_cluster_meta_meta_loop(dset,args.num_meta_meta_epochs,args.num_meta_epochs,args.num_pseudo_label_epochs,args.prob_thresh,selected_acts)
             accs.append(acc); nmis.append(nmi); rand_idxs.append(rand_idx)
         for t in zip(accs,nmis,rand_idxs):
             print(t)
