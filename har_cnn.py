@@ -439,11 +439,16 @@ def compute_and_save_metrics(preds_dict,gts,results_file_path):
 def main(args):
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
     dset_info_object = get_dataset_info_object(args.dset)
-    x_filters = (50,40,7,4)
+    if args.window_size == 512:
+        x_filters = (50,40,7,4)
+        x_strides = (2,2,1,1)
+        max_pools = ((2,1),(2,1),(2,1),(2,1))
+    elif args.window_size == 100:
+        x_filters = (20,20,5,3)
+        x_strides = (1,1,1,1)
+        max_pools = ((2,1),(2,1),(2,1),1)
     y_filters = (1,1,1,dset_info_object.num_channels)
-    x_strides = (2,2,1,1)
     y_strides = (1,1,1,1)
-    max_pools = ((2,1),(2,1),(2,1),(2,1))
     num_classes = args.num_classes if args.num_classes != -1 else dset_info_object.num_classes
     enc = EncByLayer(x_filters,y_filters,x_strides,y_strides,max_pools,show_shapes=args.show_shapes).cuda()
     mlp = Var_BS_MLP(32,256,num_classes).cuda()
@@ -457,7 +462,7 @@ def main(args):
         dset_train, selected_acts = make_single_dset(args,subj_ids)
         num_ftrs = dset_train.x.shape[-1]
         print(num_ftrs)
-        lat = enc(torch.ones((2,1,512,num_ftrs),device='cuda'))
+        lat = enc(torch.ones((2,1,args.window_size,num_ftrs),device='cuda'))
     elif args.train_type == 'full':
         dsets_by_id = make_dsets_by_user(args,subj_ids)
         bad_ids = []
