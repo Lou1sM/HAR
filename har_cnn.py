@@ -482,15 +482,18 @@ def main(args):
                 selected_acts)
         har.total_time = time.time() - start_time
         results_file_path = f'experiments/{args.exp_name}/results.txt'
+        check_dir(f"experiments/{args.exp_name}")
         np.save(f"experiments/{args.exp_name}/best_preds", best_preds)
         np.save(f"experiments/{args.exp_name}/preds", preds)
+        compute_and_save_metrics({'One Big Preds':[preds]},[numpyify(dset_train.y)],results_file_path)
         with open(results_file_path,'a') as f:
             f.write(f"Best acc: {best_acc}")
             f.write(f"Best nmi: {best_nmi}")
             f.write(f"Best ari: {best_ari}")
             f.write(f"Best f1: {best_f1}")
+            for relevant_arg in cl_args.RELEVANT_ARGS:
+                f.write(f"\n{relevant_arg}: {vars(ARGS).get(relevant_arg)}")
         har.express_times(results_file_path)
-        compute_and_save_metrics({'One Big Preds':[preds]},[numpyify(dset_train.y)],results_file_path)
     elif args.train_type == 'cluster_individually':
         print("CLUSTERING EACH DSET SEPARATELY")
         accs, nmis, rand_idxs = [], [], []
