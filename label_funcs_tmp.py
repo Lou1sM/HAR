@@ -105,9 +105,6 @@ def get_fanin_trans_dict(from_labels,to_labels,subsample_size,preserve_sizes):
                 from_labels_subsample = from_labels[sample_indices]
                 to_labels_subsample = to_labels[sample_indices]
             if [l for l in unique_labels(from_labels_subsample) if l != -1] == unique_from_labels and [l for l in unique_labels(to_labels_subsample) if l != -1] == unique_to_labels: break
-        sample_indices = np.random.choice(range(from_labels.shape[0]),subsample_size,replace=False)
-        from_labels_subsample = from_labels[sample_indices]
-        to_labels_subsample = to_labels[sample_indices]
         cost_matrix = np.array([[label_assignment_cost(to_labels_subsample,from_labels_subsample,l1,l2) for l2 in unique_from_labels] for l1 in unique_to_labels])
     row_ind, col_ind = linear_sum_assignment(cost_matrix)
     if len(col_ind) != get_num_labels(to_labels):
