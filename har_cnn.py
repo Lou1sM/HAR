@@ -299,7 +299,7 @@ class HARLearner():
         mask_histories = []
 
         for meta_meta_epoch in range(self.num_meta_meta_epochs):
-            print('\nMETA META EPOCH:', meta_meta_epoch)
+            print('META META EPOCH:', meta_meta_epoch)
             meta_pivot_pred_labels = best_preds_so_far if meta_meta_epoch > 0 else 'none'
             preds,mask,super_mask,super_super_mask = self.pseudo_label_cluster_meta_loop(dset,meta_pivot_pred_labels)
             preds_histories.append(preds)
@@ -365,7 +365,7 @@ def main(args):
         dsets_by_id = {k:v for k,v in dsets_by_id.items() if k not in bad_ids}
         print("CLUSTERING EACH DSET SEPARATELY")
         for subj_id, (dset,sa) in dsets_by_id.items():
-            print("clustering", user_id)
+            print("clustering", subj_id)
             har.pseudo_label_cluster_meta_meta_loop(subj_id,dset)
     elif args.subject_independent:
         print("CLUSTERING AS SINGLE DSET")

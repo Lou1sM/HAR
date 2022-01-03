@@ -1,4 +1,5 @@
 import sys
+import torch
 
 
 class HAR_Dataset_Container():
@@ -79,3 +80,8 @@ def get_dataset_info_object(dset_name):
     if len(dsets_by_that_name)==0: print(f"{dset_name} is not a recognized dataset"); sys.exit()
     assert len(dsets_by_that_name)==1
     return dsets_by_that_name[0]
+
+def get_num_time_points():
+    for dset_info_object in DSET_OBJECTS:
+        print(dset_info_object.code_name, sum([torch.load(f'datasets/{dset_info_object.dataset_dir_name}/precomputed/{s}step100_window512/x.pt').shape[0] for s in dset_info_object.possible_subj_ids]))
+
