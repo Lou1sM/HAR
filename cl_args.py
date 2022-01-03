@@ -35,15 +35,20 @@ def get_cl_args():
     parser.add_argument('--num_meta_meta_epochs',type=int,default=1)
     parser.add_argument('--num_pseudo_label_epochs',type=int,default=5)
     parser.add_argument('--prob_thresh',type=float,default=.95)
+    parser.add_argument('--reload_users_so_far',action='store_true')
     parser.add_argument('--rlmbda',type=float,default=.1)
     parser.add_argument('--show_transitions',action='store_true')
     parser.add_argument('--step_size',type=int,default=5)
+    parser.add_argument('--subject_independent',action='store_true')
     parser.add_argument('--test','-t',action='store_true')
     parser.add_argument('--train_type',type=str,choices=training_type_options,default='full')
     parser.add_argument('--show_shapes',action='store_true',help='print the shapes of hidden layers in enc and dec')
     parser.add_argument('--verbose',action='store_true')
     parser.add_argument('--window_size',type=int,default=512)
     ARGS = parser.parse_args()
+
+    if ARGS.reload_users_so_far and not ARGS.all_subjs:
+        print("Can only reload when running on all subjects"); sys.exit()
 
     need_umap = False
     if ARGS.short_epochs:

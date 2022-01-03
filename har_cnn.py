@@ -1,4 +1,5 @@
 import sys
+import json
 from scipy import stats
 from hmmlearn import hmm
 from copy import deepcopy
@@ -72,14 +73,21 @@ class Var_BS_MLP(nn.Module):
         return x
 
 class HARLearner():
-    def __init__(self,enc,mlp,train_batch_size,val_batch_size,num_classes):
-        self.train_batch_size = train_batch_size
-        self.val_batch_size = val_batch_size
+    def __init__(self,enc,mlp,num_classes,args,metric_dict):
         self.num_classes = num_classes
         self.enc = enc
         self.mlp = mlp
         self.pseudo_label_lf = avoid_minus_ones_lf_wrapper(nn.CrossEntropyLoss(reduction='none'))
         self.rec_lf = nn.MSELoss(reduction='none')
+
+        for x in ['batch_size_train','batch_size_val','prob_thresh','exp_name','num_pseudo_label_epochs','num_meta_epochs','num_meta_meta_epochs']:
+            exec(f"self.{x} = args.{x}")
+
+        self.metrics = metric_dict
+        dict_for_each_metric = {m:{} for m in metric_dict.keys()}
+        self.preds = {'best':{},'last':{}}
+        self.gts = {}
+        self.results = {'best':dict_for_each_metric,'last':dict_for_each_metric}
         self.total_train_time = 0
         self.total_umap_time = 0
         self.total_cluster_time = 0
@@ -88,6 +96,37 @@ class HARLearner():
 
         self.enc_opt = torch.optim.Adam(self.enc.parameters(),lr=ARGS.enc_lr)
         self.mlp_opt = torch.optim.Adam(self.mlp.parameters(),lr=ARGS.mlp_lr)
+
+    def reload_partial_experiment(self,exp_name):
+        """Not finished! Can't get subj_ids atm"""
+        self.preds['best'] = [x for x in np.load('experiments/{exp_name}/best_preds')]
+        self.preds['last'] = [x for x in np.load('experiments/{exp_name}/preds')]
+        n = len(self.preds['best'])
+        assert len(self.preds['last']) == n
+        for metric_name in self.metrics.keys():
+            self.results['best'] = np.load('experiments/{exp_name}/self_best_{metric_name}s').tolist()
+            self.results['last'] = np.load('experiments/{exp_name}/self_{metric_name}s').tolist()
+            assert len(self.results['best']) == n and len(self.results['last']) == n
+
+    def log_preds_and_scores(self,subj_id,preds,best_preds,gt):
+        self.preds['last'][subj_id] = preds
+        self.preds['best'][subj_id] = best_preds
+        self.gts[subj_id] = gt
+        np.save(f'experiments/{self.exp_name}/best_preds/{subj_id}',self.preds['best'])
+        np.save(f'experiments/{self.exp_name}/preds/{subj_id}',self.preds['last'])
+        for metric_name,metric_func in self.metrics.items():
+            self.results['last'][metric_name][subj_id] = metric_func(preds,gt)
+            self.results['best'][metric_name][subj_id] = metric_func(best_preds,gt)
+            print(metric_name,self.results['best'][metric_name][subj_id])
+        with open(f'experiments/{self.exp_name}/metrics','w') as f: json.dump(self.results,f)
+
+    def log_final_scores(self,results_file_path):
+        N = sum([len(item) for item in self.gts.values()])
+        with open(results_file_path,'w') as f:
+            for preds_name, preds_scores in self.results.items():
+                for metric_name, scores in preds_scores.items():
+                    avg_score = sum([s*len(self.gts[subj_id]) for subj_id,s in scores.items()])/N
+                    f.write(f"{preds_name} {metric_name}: {round(avg_score,4)}\n")
 
     def express_times(self,file_path):
         total_train_time = asMinutes(self.total_train_time)
@@ -111,7 +150,7 @@ class HARLearner():
     def get_latents(self,dset):
         self.enc.eval()
         collected_latents = []
-        determin_dl = data.DataLoader(dset,batch_sampler=data.BatchSampler(data.SequentialSampler(dset),self.val_batch_size,drop_last=False),pin_memory=False)
+        determin_dl = data.DataLoader(dset,batch_sampler=data.BatchSampler(data.SequentialSampler(dset),self.batch_size_val,drop_last=False),pin_memory=False)
         for idx, (xb,yb,tb) in enumerate(determin_dl):
             batch_latents = self.enc(xb)
             batch_latents = batch_latents.view(batch_latents.shape[0],-1).detach().cpu().numpy()
@@ -119,23 +158,23 @@ class HARLearner():
         collected_latents = np.concatenate(collected_latents,axis=0)
         return collected_latents
 
-    def train_on(self,dset,num_epochs,multiplicative_mask='none',lf=None,compute_acc=True,reinit=False,rlmbda=0,custom_sampler='none',noise=0.):
+    def train_on(self,dset,multiplicative_mask='none',lf=None,compute_acc=True,reinit=False,rlmbda=0,custom_sampler='none',noise=0.):
         if reinit: self.reinit_nets()
         self.enc.train()
         self.mlp.train()
         start_time = time.time()
         if lf is None: lf = self.pseudo_label_lf
         sampler = data.RandomSampler(dset) if custom_sampler is 'none' else custom_sampler
-        dl = data.DataLoader(dset,batch_sampler=data.BatchSampler(sampler,self.train_batch_size,drop_last=False),pin_memory=False)
+        dl = data.DataLoader(dset,batch_sampler=data.BatchSampler(sampler,self.batch_size_train,drop_last=False),pin_memory=False)
         is_mask = multiplicative_mask is not 'none'
-        for epoch in range(num_epochs):
+        for epoch in range(self.num_pseudo_label_epochs):
             pred_list = []
             idx_list = []
             for batch_idx, (xb,yb,idx) in enumerate(dl):
                 latent = self.enc(xb)
                 if noise > 0: latent = noiseify(latent,noise)
                 label_pred = self.mlp(latent) if latent.ndim == 2 else self.mlp(latent.squeeze(2).squeeze(2))
-                batch_mask = 'none' if not is_mask  else multiplicative_mask[:self.train_batch_size] if ARGS.test else multiplicative_mask[idx]
+                batch_mask = 'none' if not is_mask  else multiplicative_mask[:self.batch_size_train] if ARGS.test else multiplicative_mask[idx]
                 loss = lf(label_pred,yb.long(),batch_mask)
                 if math.isnan(loss): set_trace()
                 if rlmbda>0:
@@ -155,21 +194,6 @@ class HARLearner():
             idx_array = np.concatenate(idx_list)
             pred_array_ordered = np.array([item[0] for item in sorted(zip(pred_array,idx_array),key=lambda x:x[1])])
         self.total_train_time += time.time() - start_time
-        return pred_array_ordered
-
-    def val_on(self,dset,test):
-        self.enc.eval()
-        self.mlp.eval()
-        pred_list = []
-        dl = data.DataLoader(dset,batch_sampler=data.BatchSampler(data.SequentialSampler(dset),self.val_batch_size,drop_last=False),pin_memory=False)
-        for batch_idx, (xb,yb,idx) in enumerate(dl):
-            latent = self.enc(xb)
-            label_pred = self.mlp(latent) if latent.ndim == 2 else self.mlp(latent[:,:,0,0])
-            pred_list.append(label_pred.argmax(axis=1).detach().cpu().numpy())
-            if ARGS.test: break
-        if test: return dummy_labels(self.num_classes,len(dset.y))
-        pred_array = np.concatenate(pred_list)
-        return pred_array
 
     def reinit_nets(self):
         for m in self.enc.modules():
@@ -187,12 +211,12 @@ class HARLearner():
                 torch.nn.init.ones_(m.weight.data)
                 torch.nn.init.zeros_(m.bias.data)
 
-    def pseudo_label_cluster_meta_loop(self,dset,meta_pivot_pred_labels,num_meta_epochs,num_pseudo_label_epochs,prob_thresh,selected_acts):
+    def pseudo_label_cluster_meta_loop(self,dset,meta_pivot_pred_labels):
         old_pred_labels = -np.ones(dset.y.shape)
         np_gt_labels = dset.y.detach().cpu().numpy().astype(int)
         super_mask = np.ones(len(dset)).astype(np.bool)
         mlp_accs = []
-        for epoch_num in range(num_meta_epochs):
+        for epoch_num in range(self.num_meta_epochs):
             if ARGS.test:
                 num_tiles = len(dset.y)//self.num_classes
                 new_pred_labels = np.tile(np.arange(self.num_classes),num_tiles).astype(np.long)
@@ -233,7 +257,7 @@ class HARLearner():
                 mask = np.ones(len(dset.y)).astype(np.bool)
                 mask_to_use = mask
             else:
-                mask = new_pred_probs.max(axis=1) >= prob_thresh
+                mask = new_pred_probs.max(axis=1) >= self.prob_thresh
                 if meta_pivot_pred_labels is not 'none':
                     new_pred_labels = translate_labellings(new_pred_labels,meta_pivot_pred_labels,subsample_size=30000)
                 elif epoch_num > 0:
@@ -246,7 +270,7 @@ class HARLearner():
                 mask_to_use = mask/2+super_mask/2
             pseudo_label_dset = deepcopy(dset)
             pseudo_label_dset.y = cudify(new_pred_labels)
-            mlp_preds = self.train_on(pseudo_label_dset,multiplicative_mask=cudify(mask_to_use),num_epochs=num_pseudo_label_epochs)
+            mlp_preds = self.train_on(pseudo_label_dset,multiplicative_mask=cudify(mask_to_use))
             y_np = numpyify(dset.y)
             if ARGS.verbose:
                 print('Meta Epoch:', epoch_num)
@@ -255,13 +279,13 @@ class HARLearner():
                 print('MLP accuracy:', accuracy(mlp_preds,np_gt_labels))
                 print('Masked MLP accuracy:', accuracy(mlp_preds[mask],dset.y[mask]),mask.sum())
                 print('Super Masked MLP accuracy:', accuracy(mlp_preds[super_mask],dset.y[super_mask]),super_mask.sum())
-            elif epoch_num == num_meta_epochs-1:
+            elif epoch_num == self.num_meta_epochs-1:
                 print(f"Latent: {accuracy(new_pred_labels,np_gt_labels)}\tMaskL: {accuracy(new_pred_labels[mask],y_np[mask]),mask.sum()}\tSuperMaskL{accuracy(new_pred_labels[super_mask],dset.y[super_mask]),super_mask.sum()}")
             old_pred_labels = deepcopy(new_pred_labels)
         super_super_mask = np.logical_and(super_mask,new_pred_labels==mlp_preds)
         return new_pred_labels, mask, super_mask, super_super_mask
 
-    def pseudo_label_cluster_meta_meta_loop(self,dset,num_meta_meta_epochs,num_meta_epochs,num_pseudo_label_epochs,prob_thresh,selected_acts):
+    def pseudo_label_cluster_meta_meta_loop(self,subj_id,dset):
         y_np = numpyify(dset.y)
         best_preds_so_far = dummy_labels(self.num_classes,len(dset.y))
         preds = dummy_labels(self.num_classes,len(dset.y))
@@ -274,10 +298,10 @@ class HARLearner():
         super_mask_histories = []
         mask_histories = []
 
-        for meta_meta_epoch in range(num_meta_meta_epochs):
+        for meta_meta_epoch in range(self.num_meta_meta_epochs):
             print('\nMETA META EPOCH:', meta_meta_epoch)
             meta_pivot_pred_labels = best_preds_so_far if meta_meta_epoch > 0 else 'none'
-            preds, mask, super_mask, super_super_mask = self.pseudo_label_cluster_meta_loop(dset,meta_pivot_pred_labels, num_meta_epochs=num_meta_epochs,num_pseudo_label_epochs=num_pseudo_label_epochs,prob_thresh=prob_thresh,selected_acts=selected_acts)
+            preds,mask,super_mask,super_super_mask = self.pseudo_label_cluster_meta_loop(dset,meta_pivot_pred_labels)
             preds_histories.append(preds)
             super_mask_histories.append(super_mask)
             super_super_mask_histories.append(super_super_mask)
@@ -294,147 +318,9 @@ class HARLearner():
             best_preds_so_far[got_by_super_masks] = super_mask_mode_preds[got_by_super_masks]
             best_preds_so_far[got_by_super_super_masks] = super_super_mask_mode_preds[got_by_super_super_masks]
             assert not (best_preds_so_far==-1).any()
-            best_acc = accuracy(best_preds_so_far,y_np)
-            best_nmi = rnmi(best_preds_so_far,y_np)
-            best_ari = rari(best_preds_so_far,y_np)
-            best_f1 = mean_f1(best_preds_so_far,y_np)
-            print('Results of best so far',best_acc,best_nmi,best_ari,best_f1)
 
-        return best_preds_so_far,preds,best_acc,best_nmi,best_ari,best_f1
+        self.log_preds_and_scores(subj_id=subj_id,preds=preds,best_preds=best_preds_so_far,gt=y_np)
 
-    def full_train(self,user_dsets_as_dict,args):
-        total_start_time = time.time()
-        preds_from_users_list = []
-        self_accs = []
-        self_f1s = []
-        self_aris = []
-        self_nmis = []
-        self_best_accs = []
-        self_best_f1s = []
-        self_best_aris = []
-        self_best_nmis = []
-        self_preds = []
-        self_best_preds = []
-        user_dsets = list(user_dsets_as_dict.values())
-        ygts = [numpyify(d.y) for d,sa in user_dsets]
-        check_dir(f'experiments/{ARGS.exp_name}')
-        for user_id, (user_dset, sa) in user_dsets_as_dict.items():
-            preds_from_this_user = []
-            if not ARGS.just_align_time:
-                print(f"training on {user_id}")
-                best_preds,preds,best_acc,best_nmi,best_ari,best_f1 = self.pseudo_label_cluster_meta_meta_loop(user_dset,num_meta_meta_epochs=args.num_meta_meta_epochs,num_meta_epochs=args.num_meta_epochs,num_pseudo_label_epochs=args.num_pseudo_label_epochs,prob_thresh=args.prob_thresh,selected_acts=sa)
-                self_preds.append(preds)
-                self_best_preds.append(best_preds)
-                self_best_accs.append(best_acc)
-                self_best_nmis.append(best_nmi)
-                self_best_aris.append(best_ari)
-                self_best_f1s.append(best_f1)
-                self_accs.append(accuracy(preds,numpyify(user_dset.y)))
-                self_aris.append(rari(preds,numpyify(user_dset.y)))
-                self_nmis.append(rnmi(preds,numpyify(user_dset.y)))
-                self_f1s.append(mean_f1(preds,numpyify(user_dset.y)))
-            align_start_time = time.time()
-            for other_user_id, (other_user_dset, sa) in user_dsets_as_dict.items():
-                preds = self.val_on(other_user_dset,test=ARGS.test)
-                preds_from_this_user.append(preds)
-            preds_from_users_list.append(np.concatenate(preds_from_this_user))
-            np.save(f'experiments/{ARGS.exp_name}/in_progress_preds',np.array(preds_from_users_list))
-            print(self_best_accs)
-            self.total_align_time += time.time() - align_start_time
-            if ARGS.just_align_time: print(round(self.total_align_time,4))
-        if ARGS.just_align_time:
-            print(f'Total align time: {self.total_align_time}'); sys.exit()
-        pivot_dset, _ = make_single_dset(args,args.subj_ids)
-        mega_ultra_preds = np.stack(preds_from_users_list)
-        start_idxs = [sum([len(d) for d,sa in user_dsets[:i]]) for i in range(len(user_dsets)+1)]
-        target_row = mega_ultra_preds[0]
-        hmm_self_preds_pairs = []
-        for i,row in enumerate(mega_ultra_preds):
-            t=np.concatenate([self_best_preds[0], target_row[start_idxs[i]:start_idxs[i+1]]])
-            s=np.concatenate([row[0:start_idxs[1]], self_best_preds[i]])
-            translated = translate_labellings(s,t,preserve_sizes=True)[start_idxs[1]:]
-            hmm_self_preds_pairs.append(translated)
-        debabled_mega_ultra_preds = debable(mega_ultra_preds,'none')
-        mlp_self_preds = [debabled_mega_ultra_preds[uid][start_idxs[uid]:start_idxs[uid+1]] for uid in range(len(user_dsets))]
-        hmm_self_preds_full = [translate_labellings(sa,ta,preserve_sizes=True) for sa,ta in zip(self_preds,mlp_self_preds)]
-        hmm_best_preds = [translate_labellings(sa,ta,preserve_sizes=True) for sa,ta in zip(self_best_preds,mlp_self_preds)]
-        print('legit untranslated acc:', accuracy(np.concatenate(self_best_preds),np.concatenate(ygts)))
-        print('legit full acc:', accuracy(np.concatenate(hmm_self_preds_full),np.concatenate(ygts)))
-        print('legit pairs acc:', accuracy(np.concatenate(hmm_self_preds_pairs),np.concatenate(ygts)))
-        print('unlegit untranslated acc:', np.array([accuracy(p,y) for p,y in zip(self_best_preds,ygts)]).mean())
-        print('unlegit full acc:', np.array([accuracy(p,y) for p,y in zip(hmm_self_preds_full,ygts)]).mean())
-        print('unlegit pairs acc:', np.array([accuracy(p,y) for p,y in zip(hmm_self_preds_pairs,ygts)]).mean())
-        check_dir(f'experiments/{args.exp_name}/hmm_self_preds')
-        check_dir(f'experiments/{args.exp_name}/hmm_best_preds')
-        check_dir(f'experiments/{args.exp_name}/mlp_self_preds')
-        np.save(f'experiments/{args.exp_name}/mega_ultra_preds',mega_ultra_preds)
-        hmm_self_preds = hmm_self_preds_full
-        for uid, hsp in zip(user_dsets_as_dict.keys(),hmm_self_preds):
-            np.save(f'experiments/{args.exp_name}/hmm_self_preds/{uid}',hsp)
-        for uid, msp in zip(user_dsets_as_dict.keys(),mlp_self_preds):
-            np.save(f'experiments/{args.exp_name}/mlp_self_preds/{uid}',msp)
-        for uid, hbp in zip(user_dsets_as_dict.keys(),hmm_best_preds):
-            np.save(f'experiments/{args.exp_name}/hmm_best_preds/{uid}',hbp)
-        if any([get_num_labels(a)!=get_num_labels(b) for a,b in zip(hmm_self_preds,self_preds)]):set_trace()
-        def test_trans_acc(transed_preds):
-            trans_dicts = [get_trans_dict(transed_preds[i],numpyify(user_dsets[i][0].y))[0] for i in range(len(hmm_self_preds))]
-            nc = get_dataset_info_object(args.dset).num_classes
-            ordered_targs = np.array([[d[i] for i in sorted(d.keys())] for d in trans_dicts if len(d)==nc+1])
-            return np.array([ordered_targs==r for r in ordered_targs]).mean()
-        trans_acc_full = test_trans_acc(hmm_self_preds_full)
-        trans_acc_pairs = test_trans_acc(hmm_self_preds_pairs)
-        results_file_path = f'experiments/{args.exp_name}/results.txt'
-        print(f'Trans acc_full: {trans_acc_full}')
-        print(f'Trans acc_pairs: {trans_acc_pairs}')
-
-        np_things = ['debabled_mega_ultra_preds','self_accs','self_f1s','self_aris','self_nmis','self_best_accs','self_best_f1s','self_best_aris','self_best_nmis']
-        if args.compute_cross_metrics:
-            cross_accs = np.array([[accuracy(mega_ultra_preds[pred_id][start_idxs[target_id]:start_idxs[target_id+1]],numpyify(user_dsets[target_id][0].y)) for target_id in range(len(user_dsets))] for pred_id in range(len(user_dsets))])
-            cross_aris = np.array([[rari(mega_ultra_preds[pred_id][start_idxs[target_id]:start_idxs[target_id+1]],numpyify(user_dsets[target_id][0].y)) for target_id in range(len(user_dsets))] for pred_id in range(len(user_dsets))])
-            cross_nmis = np.array([[rnmi(mega_ultra_preds[pred_id][start_idxs[target_id]:start_idxs[target_id+1]],numpyify(user_dsets[target_id][0].y)) for target_id in range(len(user_dsets))] for pred_id in range(len(user_dsets))])
-            np_things += ['cross_accs','cross_aris','cross_nmis']
-        for np_thing in np_things:
-            exec(f"np.save('experiments/{args.exp_name}/{np_thing}',{np_thing})")
-
-        scores_by_metric_name = {'self':self_preds,'self_best':self_best_preds,'hmm':hmm_self_preds,'hmm_best':hmm_best_preds,'mlp': mlp_self_preds}
-        compute_and_save_metrics(scores_by_metric_name,ygts,results_file_path)
-
-        check_dir(f'experiments/{args.exp_name}/mlp_self_preds')
-        with open(results_file_path,'a') as f:
-            if args.compute_cross_metrics:
-                f.write(f'Mean cross acc: {mean_off_diagonal(cross_accs)}')
-                f.write(f'Mean cross ari: {mean_off_diagonal(cross_aris)}')
-                f.write(f'Mean cross nmi: {mean_off_diagonal(cross_nmis)}')
-            for relevant_arg in cl_args.RELEVANT_ARGS:
-                f.write(f"\n{relevant_arg}: {vars(ARGS).get(relevant_arg)}")
-        if ARGS.all_subjs:
-            dset_info_object = get_dataset_info_object(args.dset)
-            np.save(f'datasets/{dset_info_object.dataset_dir_name}/full_ygt',np.concatenate([numpyify(d.y) for d,sa in user_dsets]))
-
-        self.total_time = time.time() - total_start_time
-        self.express_times(results_file_path)
-
-
-def compute_and_save_metrics(preds_dict,gts,results_file_path):
-    """Computes acc,nmi,ari and meanf1 for a list of preds.
-
-    preds_dict: keys are names of preds, values are lists of preds, one for each user
-    """
-
-    total_num_dpoints = sum([len(item) for item in gts])
-    for preds_name, preds in preds_dict.items():
-        accs = [accuracy(p,gt) for p, gt in zip(preds,gts)]
-        nmis = [rnmi(p,gt) for p, gt in zip(preds,gts)]
-        aris = [rari(p,gt) for p, gt in zip(preds,gts)]
-        mf1s = [mean_f1(p,gt) for p, gt in zip(preds,gts)]
-        for metric_name, scores in zip(('Acc','NMI','ARI','MeanF1'),[accs,nmis,aris,mf1s]):
-            avg_score = sum([s*len(gt) for s,gt in zip(scores, gts)])/total_num_dpoints
-            print(f"{preds_name} {metric_name}: {avg_score}")
-            if results_file_path != 'none':
-                with open(results_file_path,'a') as f:
-                    f.write(f"{preds_name} {metric_name}: {avg_score}")
-                    f.write(f'\nAll {preds_name} {metric_name}:\n')
-                    f.write(' '.join([str(s) for s in scores])+'\n')
 
 def main(args):
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
@@ -456,59 +342,40 @@ def main(args):
         enc.load_state_dict(torch.load('enc_pretrained.pt'))
     subj_ids = args.subj_ids
 
-    har = HARLearner(enc=enc,mlp=mlp,train_batch_size=args.batch_size_train,val_batch_size=args.batch_size_val,num_classes=num_classes)
+    metric_dict = {'acc':accuracy,'nmi':rnmi,'ari':rari,'f1':mean_f1}
+    har = HARLearner(enc=enc,mlp=mlp,num_classes=num_classes,args=args,metric_dict=metric_dict)
 
+    start_time = time.time()
+    already_exists = check_dir(f"experiments/{args.exp_name}/preds")
+    check_dir(f"experiments/{args.exp_name}/best_preds")
     if args.show_shapes:
         dset_train, selected_acts = make_single_dset(args,subj_ids)
         num_ftrs = dset_train.x.shape[-1]
         print(num_ftrs)
         lat = enc(torch.ones((2,1,args.window_size,num_ftrs),device='cuda'))
-    elif args.train_type == 'full':
+        sys.exit()
+    elif not args.subject_independent:
         dsets_by_id = make_dsets_by_user(args,subj_ids)
         bad_ids = []
         for user_id, (dset,sa) in dsets_by_id.items():
             n = get_num_labels(dset.y)
             if n < dset_info_object.num_classes/2:
-                print(f"Excluding user {user_id}, only has {n} different labels, instead of {num_classes}")
+                print(f"Excluding user {user_id}, only has {n} different labels, out of {num_classes}")
                 bad_ids.append(user_id)
         dsets_by_id = {k:v for k,v in dsets_by_id.items() if k not in bad_ids}
-        print("FULL TRAINING")
-        har.full_train(dsets_by_id,args)
-    elif args.train_type == 'cluster_as_single':
-        print("CLUSTERING AS SINGLE DSET")
-        start_time = time.time()
-        dset_train, selected_acts = make_single_dset(args,subj_ids)
-        best_preds,preds,best_acc,best_nmi,best_ari,best_f1 = har.pseudo_label_cluster_meta_meta_loop(
-                dset_train,
-                args.num_meta_meta_epochs,
-                args.num_meta_epochs,
-                args.num_pseudo_label_epochs,
-                args.prob_thresh,
-                selected_acts)
-        har.total_time = time.time() - start_time
-        results_file_path = f'experiments/{args.exp_name}/results.txt'
-        check_dir(f"experiments/{args.exp_name}")
-        np.save(f"experiments/{args.exp_name}/best_preds", best_preds)
-        np.save(f"experiments/{args.exp_name}/preds", preds)
-        compute_and_save_metrics({'One Big Preds':[preds]},[numpyify(dset_train.y)],results_file_path)
-        with open(results_file_path,'a') as f:
-            f.write(f"Best acc: {best_acc}")
-            f.write(f"Best nmi: {best_nmi}")
-            f.write(f"Best ari: {best_ari}")
-            f.write(f"Best f1: {best_f1}")
-            for relevant_arg in cl_args.RELEVANT_ARGS:
-                f.write(f"\n{relevant_arg}: {vars(ARGS).get(relevant_arg)}")
-        har.express_times(results_file_path)
-    elif args.train_type == 'cluster_individually':
         print("CLUSTERING EACH DSET SEPARATELY")
-        accs, nmis, rand_idxs = [], [], []
-        for user_id, (dset,sa) in enumerate(dsets_by_id):
+        for subj_id, (dset,sa) in dsets_by_id.items():
             print("clustering", user_id)
-            best_preds_so_far,preds,best_acc,best_nmi,best_ari,best_f1 = har.pseudo_label_cluster_meta_meta_loop(dset,args.num_meta_meta_epochs,args.num_meta_epochs,args.num_pseudo_label_epochs,args.prob_thresh,selected_acts)
-            accs.append(acc); nmis.append(nmi); rand_idxs.append(rand_idx)
-        for t in zip(accs,nmis,rand_idxs):
-            print(t)
-        print(f"{sum(accs)/len(accs)}\tNMIs: {sum(nmis)/len(nmis)}\tRAND IDXs: {sum(rand_idxs)/len(rand_idxs)}")
+            har.pseudo_label_cluster_meta_meta_loop(subj_id,dset)
+    elif args.subject_independent:
+        print("CLUSTERING AS SINGLE DSET")
+        dset_train, selected_acts = make_single_dset(args,subj_ids)
+        har.pseudo_label_cluster_meta_meta_loop(dset_train,selected_acts)
+
+    results_file_path = f'experiments/{args.exp_name}/results.txt'
+    har.total_time = time.time() - start_time
+    har.log_final_scores(results_file_path)
+    har.express_times(results_file_path)
 
 
 if __name__ == "__main__":
