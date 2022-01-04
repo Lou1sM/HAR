@@ -67,7 +67,7 @@ if __name__ == "__main__":
     elif sys.argv[1] == 'UCI-raw':
         data_dir = 'UCI2/RawData'
         np_dir = 'UCI2/np_data'
-        print("\n#####Preprocessing UCI2#####\n")
+        print("\n#####Preprocessing UCI#####\n")
         if not os.path.isdir(np_dir):
             os.makedirs(np_dir)
 
@@ -100,18 +100,10 @@ if __name__ == "__main__":
             acc_array = np.concatenate(acc_array_list)
             gyro_array = np.concatenate(gyro_array_list)
             total_array = np.concatenate((acc_array,gyro_array),axis=1)
-            print(total_array.shape,label_array.shape)
             outpath = join(np_dir,f'user{user_idx}.npy')
             np.save(outpath,total_array)
             label_outpath = join(np_dir,f'user{user_idx}_labels.npy')
             np.save(label_outpath,label_array)
-
-    elif sys.argv[1] == 'UCI-pre':
-        one_big_X_array = array_from_txt('UCI2/UCI HAR Dataset/train/X_train.txt')
-        one_big_y_array = np.squeeze(array_from_txt('UCI2/UCI HAR Dataset/train/y_train.txt'),axis=1)
-        print(one_big_y_array.shape)
-        np.save('UCI2/X_train.npy',one_big_X_array)
-        np.save('UCI2/y_train.npy',one_big_y_array)
 
     elif sys.argv[1] == 'WISDM-v1':
         with open('WISDM_ar_v1.1/WISDM_ar_v1.1_raw.txt') as f: text = f.readlines()
@@ -143,8 +135,8 @@ if __name__ == "__main__":
                 try:
                     line1, line2 = line.split(';')
                     process_line(line1); process_line(line2)
-                    print(f"Processing separately as\n{line1}\nand\n{line2}")
-                except: print("Can't process this line\n")
+                    print(f"I think this was two lines erroneously put on one line. Processing separately as\n{line1}\nand\n{line2}")
+                except: print("Can't process this line at all, omitting")
         one_big_X_array = np.array(X_list)
         one_big_y_array = np.array(y_list)
         one_big_users_array = np.array(users_list)
@@ -166,6 +158,7 @@ if __name__ == "__main__":
 
         mp.dps = 100 # Avoid floating point errors in label insertion function
         for user_idx in range(1600,1651):
+            print('user', user_idx)
             phone_acc_path = join(p_dir,'accel',f'data_{user_idx}_accel_phone.txt')
             watch_acc_path = join(w_dir,'accel',f'data_{user_idx}_accel_watch.txt')
             phone_gyro_path = join(p_dir,'gyro',f'data_{user_idx}_gyro_phone.txt')
@@ -189,11 +182,10 @@ if __name__ == "__main__":
             equalized_user_arrays = [array_expanded(a,max_len) for a in user_arrays]
             equalized_label_arrays = [array_expanded(lab_a,max_len) for lab_a in label_arrays]
             total_user_array = np.concatenate(equalized_user_arrays,axis=1)
-            print(total_user_array.shape)
             mode_object = stats.mode(np.stack(equalized_label_arrays,axis=1),axis=1)
             mode_labels = mode_object.mode[:,0]
             # Print how many windows contained just 1 label, how many 2 etc.
-            print('Agreement in labels:',label_funcs_tmp.label_counts(mode_object.count[:,0]))
+            #print('Agreement in labels:',label_funcs_tmp.label_counts(mode_object.count[:,0]))
             certains = (mode_object.count == 4)[:,0]
             user_fn = f'{user_idx}.npy'
             misc.np_save(total_user_array,np_dir,user_fn)
@@ -210,6 +202,7 @@ if __name__ == "__main__":
             os.makedirs(np_dir)
 
         for filename in os.listdir(data_dir):
+            print(filename)
             if filename == 'dataset manual.pdf': continue
             if not filename.split('_')[1].startswith('ideal'):
                 continue
