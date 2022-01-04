@@ -75,4 +75,4 @@ def get_cl_args():
         print(f"You have specified non-existent ids: {bad_ids}\nExistent ids are {all_possible_ids}"); sys.exit()
     return ARGS, need_umap
 
-RELEVANT_ARGS = ['batch_size','clusterer','dset','enc_lr','dec_lr','frac_gt_labels','mlp_lr','no_umap','noise','num_meta_epochs','num_meta_meta_epochs','num_pseudo_label_epochs','prob_thresh','rlmbda','step_size']
+RELEVANT_ARGS = ['clusterer','dset','no_umap','num_meta_epochs','num_meta_meta_epochs','num_pseudo_label_epochs','step_size','subject_independent']

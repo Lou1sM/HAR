@@ -93,6 +93,8 @@ class HARLearner():
         self.total_align_time = 0
         self.total_time = 0
 
+        self.parameters_used = {ra:getattr(args,ra) for ra in cl_args.RELEVANT_ARGS}
+
         self.enc_opt = torch.optim.Adam(self.enc.parameters(),lr=ARGS.enc_lr)
         self.mlp_opt = torch.optim.Adam(self.mlp.parameters(),lr=ARGS.mlp_lr)
 
@@ -125,7 +127,11 @@ class HARLearner():
             for preds_name, preds_scores in self.results.items():
                 for metric_name, scores in preds_scores.items():
                     avg_score = sum([s*len(self.gts[subj_id]) for subj_id,s in scores.items()])/N
-                    f.write(f"{preds_name} {metric_name}: {round(avg_score,4)}\n")
+                    summary_string = f"{preds_name} {metric_name}: {round(avg_score,4)}"
+                    f.write(summary_string+'\n')
+                    print(summary_string)
+            for param_name, param_value in self.parameters_used.items():
+                f.write(f"{param_name}: {param_value}\n")
 
     def express_times(self,file_path):
         total_train_time = asMinutes(self.total_train_time)
@@ -315,6 +321,7 @@ class HARLearner():
             best_preds_so_far[got_by_masks] = mask_mode_preds[got_by_masks]
             best_preds_so_far[got_by_super_masks] = super_mask_mode_preds[got_by_super_masks]
             best_preds_so_far[got_by_super_super_masks] = super_super_mask_mode_preds[got_by_super_super_masks]
+            print('frac preds the same', (best_preds_so_far==preds).mean())
             assert not (best_preds_so_far==-1).any()
 
         self.log_preds_and_scores(subj_id=subj_id,preds=preds,best_preds=best_preds_so_far,gt=y_np)
