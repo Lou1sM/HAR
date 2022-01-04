@@ -1,6 +1,5 @@
 import sys
 import json
-from scipy import stats
 from hmmlearn import hmm
 from copy import deepcopy
 import os
@@ -14,8 +13,8 @@ from torch.utils import data
 import cl_args
 from dl_utils.misc import asMinutes,check_dir
 #from dl_utils.label_funcs import accuracy, mean_f1, debable, translate_labellings, get_num_labels, label_counts, dummy_labels, avoid_minus_ones_lf_wrapper,masked_mode,acc_by_label, get_trans_dict
-from label_funcs_tmp import accuracy, mean_f1, debable, translate_labellings, get_num_labels, label_counts, dummy_labels, avoid_minus_ones_lf_wrapper,masked_mode,acc_by_label, get_trans_dict
-from dl_utils.tensor_funcs import noiseify, numpyify, cudify, mean_off_diagonal
+from label_funcs_tmp import accuracy, mean_f1, translate_labellings, get_num_labels, label_counts, dummy_labels, avoid_minus_ones_lf_wrapper,masked_mode,acc_by_label, get_trans_dict
+from dl_utils.tensor_funcs import noiseify, numpyify, cudify
 from make_dsets import make_single_dset, make_dsets_by_user
 from sklearn.metrics import normalized_mutual_info_score,adjusted_rand_score
 from sklearn.mixture import GaussianMixture
@@ -118,7 +117,7 @@ class HARLearner():
             self.results['last'][metric_name][subj_id] = metric_func(preds,gt)
             self.results['best'][metric_name][subj_id] = metric_func(best_preds,gt)
             print(metric_name,self.results['best'][metric_name][subj_id])
-        with open(f'experiments/{self.exp_name}/metrics','w') as f: json.dump(self.results,f)
+        with open(f'experiments/{self.exp_name}/metrics.json','w') as f: json.dump(self.results,f)
 
     def log_final_scores(self,results_file_path):
         N = sum([len(item) for item in self.gts.values()])
@@ -174,7 +173,7 @@ class HARLearner():
                 latent = self.enc(xb)
                 if noise > 0: latent = noiseify(latent,noise)
                 label_pred = self.mlp(latent) if latent.ndim == 2 else self.mlp(latent.squeeze(2).squeeze(2))
-                batch_mask = 'none' if not is_mask  else multiplicative_mask[:self.batch_size_train] if ARGS.test else multiplicative_mask[idx]
+                batch_mask = 'none' if not is_mask else multiplicative_mask[:self.batch_size_train] if ARGS.test else multiplicative_mask[idx]
                 loss = lf(label_pred,yb.long(),batch_mask)
                 if math.isnan(loss): set_trace()
                 if rlmbda>0:
@@ -194,6 +193,7 @@ class HARLearner():
             idx_array = np.concatenate(idx_list)
             pred_array_ordered = np.array([item[0] for item in sorted(zip(pred_array,idx_array),key=lambda x:x[1])])
         self.total_train_time += time.time() - start_time
+        return pred_array_ordered
 
     def reinit_nets(self):
         for m in self.enc.modules():
@@ -215,7 +215,6 @@ class HARLearner():
         old_pred_labels = -np.ones(dset.y.shape)
         np_gt_labels = dset.y.detach().cpu().numpy().astype(int)
         super_mask = np.ones(len(dset)).astype(np.bool)
-        mlp_accs = []
         for epoch_num in range(self.num_meta_epochs):
             if ARGS.test:
                 num_tiles = len(dset.y)//self.num_classes
@@ -289,7 +288,6 @@ class HARLearner():
         y_np = numpyify(dset.y)
         best_preds_so_far = dummy_labels(self.num_classes,len(dset.y))
         preds = dummy_labels(self.num_classes,len(dset.y))
-        best_acc,best_nmi,best_ari,best_f1 = 0,0,0,0
         got_by_super_masks = np.zeros(len(dset)).astype(np.bool)
         got_by_super_super_masks = np.zeros(len(dset)).astype(np.bool)
         got_by_masks = np.zeros(len(dset)).astype(np.bool)
