@@ -13,7 +13,7 @@ def get_cl_args():
     epochs_group = parser.add_mutually_exclusive_group(required=False)
     epochs_group.add_argument('--full_epochs',action='store_true')
     epochs_group.add_argument('--short_epochs',action='store_true')
-    parser.add_argument('--ablate_label_gather',action='store_true')
+    parser.add_argument('--ablate_label_filter',action='store_true')
     parser.add_argument('--all_subjs',action='store_true')
     parser.add_argument('--batch_size_train',type=int,default=256)
     parser.add_argument('--batch_size_val',type=int,default=1024)
@@ -35,7 +35,7 @@ def get_cl_args():
     parser.add_argument('--num_meta_meta_epochs',type=int,default=1)
     parser.add_argument('--num_pseudo_label_epochs',type=int,default=5)
     parser.add_argument('--prob_thresh',type=float,default=.95)
-    parser.add_argument('--reload_users_so_far',action='store_true')
+    parser.add_argument('--reload_ids',type=int,default=0)
     parser.add_argument('--rlmbda',type=float,default=.1)
     parser.add_argument('--show_transitions',action='store_true')
     parser.add_argument('--step_size',type=int,default=5)
@@ -46,9 +46,6 @@ def get_cl_args():
     parser.add_argument('--verbose',action='store_true')
     parser.add_argument('--window_size',type=int,default=512)
     ARGS = parser.parse_args()
-
-    if ARGS.reload_users_so_far and not ARGS.all_subjs:
-        print("Can only reload when running on all subjects"); sys.exit()
 
     need_umap = False
     if ARGS.short_epochs:

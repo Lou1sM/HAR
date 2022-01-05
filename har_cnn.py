@@ -83,10 +83,9 @@ class HARLearner():
             exec(f"self.{x} = args.{x}")
 
         self.metrics = metric_dict
-        dict_for_each_metric = {m:{} for m in metric_dict.keys()}
         self.preds = {'best':{},'last':{}}
         self.gts = {}
-        self.results = {'best':dict_for_each_metric,'last':dict_for_each_metric}
+        self.results={'best':{m:{} for m in metric_dict.keys()},'last':{m:{} for m in metric_dict.keys()}}
         self.total_train_time = 0
         self.total_umap_time = 0
         self.total_cluster_time = 0
@@ -98,23 +97,18 @@ class HARLearner():
         self.enc_opt = torch.optim.Adam(self.enc.parameters(),lr=ARGS.enc_lr)
         self.mlp_opt = torch.optim.Adam(self.mlp.parameters(),lr=ARGS.mlp_lr)
 
-    def reload_partial_experiment(self,exp_name):
-        """Not finished! Can't get subj_ids atm"""
-        self.preds['best'] = [x for x in np.load('experiments/{exp_name}/best_preds')]
-        self.preds['last'] = [x for x in np.load('experiments/{exp_name}/preds')]
-        n = len(self.preds['best'])
-        assert len(self.preds['last']) == n
-        for metric_name in self.metrics.keys():
-            self.results['best'] = np.load('experiments/{exp_name}/self_best_{metric_name}s').tolist()
-            self.results['last'] = np.load('experiments/{exp_name}/self_{metric_name}s').tolist()
-            assert len(self.results['best']) == n and len(self.results['last']) == n
+    def reload_partial_experiment(self,exp_name,subj_ids,gts):
+        for subj_id,gt in zip(subj_ids,gts):
+            best_preds = np.load('experiments/{exp_name}/best_preds/{sid}')
+            preds = np.load('experiments/{exp_name}/preds/{sid}')
+            self.log_preds_and_scores(subj_id,preds,best_preds,gt)
 
     def log_preds_and_scores(self,subj_id,preds,best_preds,gt):
         self.preds['last'][subj_id] = preds
         self.preds['best'][subj_id] = best_preds
         self.gts[subj_id] = gt
-        np.save(f'experiments/{self.exp_name}/best_preds/{subj_id}',self.preds['best'])
-        np.save(f'experiments/{self.exp_name}/preds/{subj_id}',self.preds['last'])
+        np.save(f'experiments/{self.exp_name}/best_preds/{subj_id}',self.preds['best'][subj_id],allow_pickle=False)
+        np.save(f'experiments/{self.exp_name}/preds/{subj_id}',self.preds['last'][subj_id],allow_pickle=False)
         for metric_name,metric_func in self.metrics.items():
             self.results['last'][metric_name][subj_id] = metric_func(preds,gt)
             self.results['best'][metric_name][subj_id] = metric_func(best_preds,gt)
@@ -258,7 +252,7 @@ class HARLearner():
                     print('num transitions', num_transitions)
 
                 self.total_cluster_time += time.time() - start_time
-            if ARGS.ablate_label_gather or ARGS.test:
+            if ARGS.ablate_label_filter or ARGS.test:
                 mask = np.ones(len(dset.y)).astype(np.bool)
                 mask_to_use = mask
             else:
@@ -368,6 +362,16 @@ def main(args):
                 print(f"Excluding user {user_id}, only has {n} different labels, out of {num_classes}")
                 bad_ids.append(user_id)
         dsets_by_id = {k:v for k,v in dsets_by_id.items() if k not in bad_ids}
+        print('reloading clusterings for', [x for x in subj_ids[:args.reload_ids]])
+        for rid in subj_ids[:args.reload_ids]:
+            if rid in bad_ids: continue
+            print('reloading clusterings for', rid)
+            rdset,sa = dsets_by_id.pop(rid)
+            best_preds = np.load(f'experiments/{args.exp_name}/best_preds/{rid}.npy')
+            preds = np.load(f'experiments/{args.exp_name}/preds/{rid}.npy')
+            har.log_preds_and_scores(rid,preds,best_preds,numpyify(rdset.y))
+        print('clustering remaining ids', [x for x in subj_ids[args.reload_ids:]], 'from scratch\n')
+
         print("CLUSTERING EACH DSET SEPARATELY")
         for subj_id, (dset,sa) in dsets_by_id.items():
             print("clustering", subj_id)
