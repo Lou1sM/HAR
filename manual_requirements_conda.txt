@@ -1,0 +1,4 @@
+conda install pandas scikit-learn mpmath
+pip install dl-utils385
+conda install -c conda-forge umap-learn hmmlearn
+conda install pytorch cudatoolkit=11.2 -c pytorch

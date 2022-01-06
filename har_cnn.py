@@ -133,7 +133,7 @@ class HARLearner():
         total_cluster_time = asMinutes(self.total_cluster_time)
         total_align_time = asMinutes(self.total_align_time)
         total_time = asMinutes(self.total_time)
-        if file_path is not 'none':
+        if file_path != 'none':
             with open(file_path,'a') as f:
                 f.write(f'Total align time: {total_align_time}\n')
                 f.write(f'Total train time: {total_train_time}\n')
@@ -163,9 +163,9 @@ class HARLearner():
         self.mlp.train()
         start_time = time.time()
         if lf is None: lf = self.pseudo_label_lf
-        sampler = data.RandomSampler(dset) if custom_sampler is 'none' else custom_sampler
+        sampler = data.RandomSampler(dset) if custom_sampler == 'none' else custom_sampler
         dl = data.DataLoader(dset,batch_sampler=data.BatchSampler(sampler,self.batch_size_train,drop_last=False),pin_memory=False)
-        is_mask = multiplicative_mask is not 'none'
+        is_mask = multiplicative_mask != 'none'
         for epoch in range(self.num_pseudo_label_epochs):
             pred_list = []
             idx_list = []
@@ -257,7 +257,7 @@ class HARLearner():
                 mask_to_use = mask
             else:
                 mask = new_pred_probs.max(axis=1) >= self.prob_thresh
-                if meta_pivot_pred_labels is not 'none':
+                if meta_pivot_pred_labels != 'none':
                     new_pred_labels = translate_labellings(new_pred_labels,meta_pivot_pred_labels,subsample_size=30000)
                 elif epoch_num > 0:
                     new_pred_labels = translate_labellings(new_pred_labels,old_pred_labels,subsample_size=30000)
