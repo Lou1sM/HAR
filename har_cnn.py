@@ -378,8 +378,8 @@ def main(args):
             har.pseudo_label_cluster_meta_meta_loop(subj_id,dset)
     elif args.subject_independent:
         print("CLUSTERING AS SINGLE DSET")
-        dset_train, selected_acts = make_single_dset(args,subj_ids)
-        har.pseudo_label_cluster_meta_meta_loop(dset_train,selected_acts)
+        one_big_dset, selected_acts = make_single_dset(args,subj_ids)
+        har.pseudo_label_cluster_meta_meta_loop('all',one_big_dset)
 
     results_file_path = f'experiments/{args.exp_name}/results.txt'
     har.total_time = time.time() - start_time
