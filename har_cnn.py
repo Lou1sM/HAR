@@ -225,6 +225,7 @@ class HARLearner():
                 new_pred_labels = new_pred_labels.astype(np.long)
                 old_pred_labels = new_pred_labels
             else:
+                set_trace()
                 latents = self.get_latents(dset)
                 start_time = time.time()
                 umapped_latents = latents if ARGS.no_umap else umap.UMAP(min_dist=0,n_neighbors=60,n_components=2,random_state=42).fit_transform(latents.squeeze())
@@ -239,7 +240,13 @@ class HARLearner():
                     num_action_blocks = len([item for idx,item in enumerate(dset.y) if dset.y[idx-1] != item])
                     prob_new_action = num_action_blocks/len(dset)
                     model.transmat_ = (np.eye(self.num_classes) * (1-prob_new_action)) + (np.ones((self.num_classes,self.num_classes))*prob_new_action/self.num_classes)
-                    model.fit(umapped_latents)
+                    try:
+                        model.fit(umapped_latents)
+                    except ValueError: # Try again without initialization
+                        print(f"hmm failed, there are {len(np_gt_labels)} data points, is that small?")
+                        print("trying again without initialization")
+                        model = hmm.GaussianHMM(self.num_classes,'full')
+                        model.fit(umapped_latents)
                     new_pred_labels = model.predict(umapped_latents)
                     new_pred_probs = model.predict_proba(umapped_latents)
                 elif ARGS.clusterer == 'GMM':
@@ -361,8 +368,8 @@ def main(args):
             if n < dset_info_object.num_classes/2:
                 print(f"Excluding user {user_id}, only has {n} different labels, out of {num_classes}")
                 bad_ids.append(user_id)
-        dsets_by_id = {k:v for k,v in dsets_by_id.items() if k not in bad_ids}
-        print('reloading clusterings for', [x for x in subj_ids[:args.reload_ids]])
+        if not args.bad_ids: dsets_by_id = {k:v for k,v in dsets_by_id.items() if k not in bad_ids}
+        print('reloading clusterings for', [x for x in subj_ids[:args.reload_ids] if x not in bad_ids])
         for rid in subj_ids[:args.reload_ids]:
             if rid in bad_ids: continue
             print('reloading clusterings for', rid)

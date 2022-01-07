@@ -2,7 +2,6 @@
 
 mkdir -p datasets
 cd datasets
-pwd
 
 #PAMAP
 echo -e "\n###############"
@@ -18,11 +17,9 @@ echo GETTING AND PREPARING UCI DATA
 echo -e "###############\n"
 mkdir -p UCI2
 cd UCI2
-pwd
 wget http://archive.ics.uci.edu/ml/machine-learning-databases/00341/HAPT%20Data%20Set.zip
 unzip HAPT\ Data\ Set.zip
 cd ..
-pwd
 python ../convert_data_to_np.py UCI-raw
 
 #mkdir -p capture24
@@ -74,3 +71,9 @@ cd ..
 python ../convert_data_to_np.py REALDISP
 cd ..
 pwd
+#HHAR
+mkdir -p hhar
+wget http://archive.ics.uci.edu/ml/machine-learning-databases/00344/Activity%20recognition%20exp.zip
+unzip Activity\ recognition\ exp.zip
+python ../convert_data_to_np.py HHAR
+cd ..

@@ -1,4 +1,5 @@
 from pdb import set_trace
+from collections import Counter
 from scipy.fft import fft
 from scipy import stats
 from mpmath import mp, mpf
@@ -213,6 +214,7 @@ if __name__ == "__main__":
 
             np.save(join(np_dir,filename.split('_')[0]), x)
             np.save(join(np_dir,filename.split('_')[0])+'_labels', y)
+
     elif sys.argv[1] == 'Capture24':
         np_dir = 'capture24/np_data'
         if not os.path.isdir(np_dir):
@@ -237,5 +239,48 @@ if __name__ == "__main__":
             y = translated_df['int_label'].to_numpy()
             np.save(join(np_dir,f'{subj_id}.npy'),x)
             np.save(join(np_dir,f'{subj_id}_labels.npy'),y)
+
+    elif sys.argv[1] == 'HHAR':
+        data_dir = 'Activity recognition exp'
+        np_dir = 'hhar/np_data'
+        print("\n#####Preprocessing HHAR#####\n")
+        if not os.path.isdir(np_dir):
+            os.makedirs(np_dir)
+
+        pandaload = lambda path: pd.read_csv(join(data_dir,'Phones_accelerometer.csv')).set_index('Creation_Time').drop(['Index','Arrival_Time','Model','Device'],axis=1).dropna()
+        print('loading dataframes\n')
+        phone_acc_df = pandaload('Phones_accelerometer.csv')
+        phone_gyro_df = pandaload('Phones_gyroscope.csv')
+        watch_acc_df = pandaload('Watch_accelerometer.csv')
+        watch_gyro_df = pandaload('Watch_gyroscope.csv')
+        activities_list = ['bike', 'sit', 'stand', 'walk', 'stairsup', 'stairsdown']
+        user_list = list('abcdefghi')
+
+        for user_letter_name in user_list:
+            print('processing user', user_letter_name)
+            user_phone_acc = phone_acc_df.loc[phone_acc_df.User==user_letter_name]
+            user_phone_gyro = phone_gyro_df.loc[phone_gyro_df.User==user_letter_name]
+            user_watch_acc = watch_acc_df.loc[watch_acc_df.User==user_letter_name]
+            user_watch_gyro = watch_acc_df.loc[watch_gyro_df.User==user_letter_name]
+            assert all([user_watch_gyro.shape==d.shape for d in (user_phone_acc,user_phone_gyro,user_watch_acc)])
+            comb_phone = user_phone_acc.join(user_phone_gyro,how='outer',lsuffix='_acc',rsuffix='_gyro')
+            comb_watch = user_watch_acc.join(user_watch_gyro,how='outer',lsuffix='_acc',rsuffix='_gyro')
+            #if not (comb_watch.gt_acc == comb_watch.gt_gyro).all(): set_trace()
+            #if not (comb_phone.gt_acc == comb_phone.gt_gyro).all(): set_trace()
+            comb = comb_phone.join(comb_watch,how='outer',lsuffix='_phone',rsuffix='_watch')
+            duplicate_rows = [x for x,count in Counter(comb.index).items() if count > 1]
+            if len(duplicate_rows) > 10: set_trace()
+            elif len(duplicate_rows) > 0:
+                print( f"removing {len(duplicate_rows)} duplicate rows")
+                comb = comb.drop(duplicate_rows)
+            if not (comb.gt_acc_phone == comb.gt_acc_watch).all(): set_trace()
+            user_X_array = comb.drop([c for c in comb.columns if 'User' in c or 'gt' in c],axis=1).to_numpy()
+            user_y_array = np.array([activities_list.index(a) for a in comb['gt_acc_phone']])
+            save_path = join(np_dir,f"{user_list.index(user_letter_name)+1}.npy")
+            label_save_path = join(np_dir,f"{user_list.index(user_letter_name)+1}_labels.npy")
+            np.save(save_path,user_X_array,allow_pickle=False)
+            np.save(label_save_path,user_y_array,allow_pickle=False)
+            print(np.load(save_path).shape)
+            print(np.load(label_save_path).shape)
 
     else: print('\nIncorrect or no dataset specified\n')

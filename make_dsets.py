@@ -154,6 +154,14 @@ def make_realdisp_dset_train_val(args,subj_ids):
     dset_train = StepDataset(x_train,y_train,window_size=args.window_size,step_size=args.step_size)
     return dset_train, selected_acts
 
+def make_hhar_dset_train_val(args,subj_ids):
+    dset_info_object = project_config.HHAR_INFO
+    x_train = np.concatenate([np.load(f'datasets/hhar/np_data/{s}.npy') for s in subj_ids])
+    y_train = np.concatenate([np.load(f'datasets/hhar/np_data/{s}_labels.npy') for s in subj_ids])
+    x_train,y_train,selected_acts = preproc_xys(x_train,y_train,args.step_size,args.window_size,dset_info_object,subj_ids)
+    dset_train = StepDataset(x_train,y_train,window_size=args.window_size,step_size=args.step_size)
+    return dset_train, selected_acts
+
 def make_capture_dset_train_val(args,subj_ids):
     action_name_dict = {0: 'sleep', 1: 'sedentary-screen', 2: 'tasks-moderate', 3: 'sedentary-non-screen', 4: 'walking', 5: 'vehicle', 6: 'bicycling', 7: 'tasks-light', 8: 'sports-continuous', 9: 'sport-interrupted'} # Should also be saved in json file in datasets/capture24
     subj_ids = len(subj_ids) - min(2,len(subj_ids)//2)
@@ -184,6 +192,8 @@ def make_single_dset(args,subj_ids):
         return make_wisdm_watch_dset_train_val(args,subj_ids)
     if args.dset == 'REALDISP':
         return make_realdisp_dset_train_val(args,subj_ids)
+    if args.dset == 'HHAR':
+        return make_hhar_dset_train_val(args,subj_ids)
     if args.dset == 'Capture24':
         return make_capture_dset_train_val(args,subj_ids)
 

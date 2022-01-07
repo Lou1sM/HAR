@@ -72,7 +72,19 @@ REALDISP_INFO = HAR_Dataset_Container(
             num_classes = 33,
             action_name_dict = realdisp_action_name_dict)
 
-DSET_OBJECTS = [PAMAP_INFO, UCI_INFO, WISDMv1_INFO, WISDMwatch_INFO,REALDISP_INFO]
+# HHAR
+hhar_ids = [str(x) for x in range(0,10)]
+activities_list = ['bike', 'sit', 'stand', 'walk', 'stairsup', 'stairsdown']
+hhar_action_name_dict = {i:act for i,act in enumerate(activities_list)}
+HHAR_INFO = HAR_Dataset_Container(
+            code_name = 'HHAR',
+            dataset_dir_name = 'hhar',
+            possible_subj_ids = realdisp_ids,
+            num_channels = 12,
+            num_classes = 6,
+            action_name_dict = hhar_action_name_dict)
+
+DSET_OBJECTS = [PAMAP_INFO, UCI_INFO, WISDMv1_INFO, WISDMwatch_INFO,REALDISP_INFO,HHAR_INFO]
 
 
 def get_dataset_info_object(dset_name):

@@ -4,7 +4,8 @@ import project_config
 
 
 def get_cl_args():
-    dset_options = ['PAMAP','UCI','WISDM-v1','WISDM-watch','REALDISP','Capture24']
+    #dset_options = ['PAMAP','UCI','WISDM-v1','WISDM-watch','REALDISP','Capture24']
+    dset_options = [di.code_name for di in project_config.DSET_OBJECTS]
     training_type_options = ['full','cluster_as_single','cluster_individually','train_frac_gts_as_single','find_similar_users']
     parser = argparse.ArgumentParser()
     subjs_group = parser.add_mutually_exclusive_group(required=False)
@@ -15,6 +16,7 @@ def get_cl_args():
     epochs_group.add_argument('--short_epochs',action='store_true')
     parser.add_argument('--ablate_label_filter',action='store_true')
     parser.add_argument('--all_subjs',action='store_true')
+    parser.add_argument('--bad_ids',action='store_true')
     parser.add_argument('--batch_size_train',type=int,default=256)
     parser.add_argument('--batch_size_val',type=int,default=1024)
     parser.add_argument('--clusterer',type=str,choices=['HMM','GMM'],default='HMM')
@@ -60,6 +62,7 @@ def get_cl_args():
         ARGS.num_meta_epochs = 1
         ARGS.num_meta_meta_epochs = 1
         ARGS.num_pseudo_label_epochs = 1
+        ARGS.subj_ids = ['0']
     elif not ARGS.no_umap and not ARGS.show_shapes: need_umap = True
     print(ARGS)
     dset_info_object = project_config.get_dataset_info_object(ARGS.dset)
@@ -68,7 +71,7 @@ def get_cl_args():
     elif ARGS.num_subjs is not None: ARGS.subj_ids = all_possible_ids[:ARGS.num_subjs]
     elif ARGS.subj_ids == ['first']: ARGS.subj_ids = all_possible_ids[:1]
     bad_ids = [x for x in ARGS.subj_ids if x not in all_possible_ids]
-    if len(bad_ids) > 0:
+    if len(bad_ids) > 0 and not (ARGS.test and ARGS.dset=='HHAR'):
         print(f"You have specified non-existent ids: {bad_ids}\nExistent ids are {all_possible_ids}"); sys.exit()
     return ARGS, need_umap
 
