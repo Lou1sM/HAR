@@ -124,6 +124,7 @@ class HARLearner():
                     summary_string = f"{preds_name} {metric_name}: {round(avg_score,4)}"
                     f.write(summary_string+'\n')
                     print(summary_string)
+            f.write('\n')
             for param_name, param_value in self.parameters_used.items():
                 f.write(f"{param_name}: {param_value}\n")
 
@@ -135,6 +136,7 @@ class HARLearner():
         total_time = asMinutes(self.total_time)
         if file_path != 'none':
             with open(file_path,'a') as f:
+                f.write('\n')
                 f.write(f'Total align time: {total_align_time}\n')
                 f.write(f'Total train time: {total_train_time}\n')
                 f.write(f'Total umap time: {total_umap_time}\n')
@@ -157,8 +159,8 @@ class HARLearner():
         collected_latents = np.concatenate(collected_latents,axis=0)
         return collected_latents
 
-    def train_on(self,dset,multiplicative_mask='none',lf=None,compute_acc=True,reinit=False,rlmbda=0,custom_sampler='none',noise=0.):
-        if reinit: self.reinit_nets()
+    def train_on(self,dset,multiplicative_mask='none',lf=None,compute_acc=True,rlmbda=0,custom_sampler='none',noise=0.):
+        if ARGS.reinit: self.reinit_nets()
         self.enc.train()
         self.mlp.train()
         start_time = time.time()

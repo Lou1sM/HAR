@@ -37,6 +37,7 @@ def get_cl_args():
     parser.add_argument('--num_meta_meta_epochs',type=int,default=1)
     parser.add_argument('--num_pseudo_label_epochs',type=int,default=5)
     parser.add_argument('--prob_thresh',type=float,default=.95)
+    parser.add_argument('--reinit',action='store_true')
     parser.add_argument('--reload_ids',type=int,default=0)
     parser.add_argument('--rlmbda',type=float,default=.1)
     parser.add_argument('--show_transitions',action='store_true')
@@ -75,4 +76,4 @@ def get_cl_args():
         print(f"You have specified non-existent ids: {bad_ids}\nExistent ids are {all_possible_ids}"); sys.exit()
     return ARGS, need_umap
 
-RELEVANT_ARGS = ['clusterer','dset','no_umap','num_meta_epochs','num_meta_meta_epochs','num_pseudo_label_epochs','step_size','subject_independent']
+RELEVANT_ARGS = ['ablate_label_filter','clusterer','dset','no_umap','num_meta_epochs','num_meta_meta_epochs','num_pseudo_label_epochs','reinit','step_size','subject_independent']
