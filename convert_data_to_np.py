@@ -280,7 +280,8 @@ if __name__ == "__main__":
             label_save_path = join(np_dir,f"{user_list.index(user_letter_name)+1}_labels.npy")
             np.save(save_path,user_X_array,allow_pickle=False)
             np.save(label_save_path,user_y_array,allow_pickle=False)
-            print(np.load(save_path).shape)
-            print(np.load(label_save_path).shape)
+            # Make smaller option for testing
+            np.save(join(np_dir,f"0.npy"),user_X_array[::1000],allow_pickle=False)
+            np.save(join(np_dir,f"0_labels.npy"),user_y_array[::1000],allow_pickle=False)
 
     else: print('\nIncorrect or no dataset specified\n')

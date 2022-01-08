@@ -227,7 +227,6 @@ class HARLearner():
                 new_pred_labels = new_pred_labels.astype(np.long)
                 old_pred_labels = new_pred_labels
             else:
-                set_trace()
                 latents = self.get_latents(dset)
                 start_time = time.time()
                 umapped_latents = latents if ARGS.no_umap else umap.UMAP(min_dist=0,n_neighbors=60,n_components=2,random_state=42).fit_transform(latents.squeeze())
