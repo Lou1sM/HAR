@@ -35,6 +35,17 @@ UCI_INFO = HAR_Dataset_Container(
             num_classes = 6,
             action_name_dict = uci_action_name_dict)
 
+# UCI_feat
+def two_digitify(x): return '0' + str(x) if len(str(x))==1 else str(x)
+uci_feat_action_name_dict = {1:'walking',2:'walking upstairs',3:'walking downstairs',4:'sitting',5:'standing',6:'lying',7:'stand_to_sit',9:'sit_to_stand',10:'sit_to_lit',11:'lie_to_sit',12:'stand_to_lie',13:'lie_to_stand'}
+UCI_FEAT_INFO = HAR_Dataset_Container(
+            code_name = 'UCI_feat',
+            dataset_dir_name = 'UCI2_feat',
+            possible_subj_ids = ['0'],
+            num_channels = 561,
+            num_classes = 6,
+            action_name_dict = uci_action_name_dict)
+
 # WISDM-v1
 wisdmv1_ids = [str(x) for x in range(1,37)] #Paper says 29 users but ids go up to 36
 activities_list = ['Jogging','Walking','Upstairs','Downstairs','Standing','Sitting']
@@ -84,7 +95,7 @@ HHAR_INFO = HAR_Dataset_Container(
             num_classes = 6,
             action_name_dict = hhar_action_name_dict)
 
-DSET_OBJECTS = [PAMAP_INFO, UCI_INFO, WISDMv1_INFO, WISDMwatch_INFO,REALDISP_INFO,HHAR_INFO]
+DSET_OBJECTS = [PAMAP_INFO, UCI_INFO, UCI_FEAT_INFO, WISDMv1_INFO, WISDMwatch_INFO,REALDISP_INFO,HHAR_INFO]
 
 
 def get_dataset_info_object(dset_name):

@@ -1,11 +1,12 @@
 import numpy as np
-from dl_utils.misc import check_dir
+from dl_utils.misc import check_dir, CifarLikeDataset
 import os
 import torch
 import project_config
 from scipy import stats
 from torch.utils import data
 #from dl_utils import label_funcs
+from dl_utils.tensor_funcs import cudify
 import label_funcs_tmp
 from pdb import set_trace
 from os.path import join
@@ -42,9 +43,21 @@ class ConcattedDataset(data.Dataset):
         batch_y = self.y[idx]
         return batch_x, batch_y, idx
 
+class UCIFeatDataset(data.Dataset):
+    def __init__(self,x,y,transforms=[]):
+        self.x, self.y = cudify(x).float(),cudify(y).float()
+        assert len(self.x) == len(self.y)
+        for transform in transforms:
+            self.x = transform(self.x)
+    def __len__(self): return len(self.x)
+    def __getitem__(self,idx):
+        batch_x = self.x[idx]
+        batch_y = self.y[idx]
+        return batch_x, batch_y, idx
+
 class StepDataset(data.Dataset):
     def __init__(self,x,y,window_size,step_size,transforms=[]):
-        self.x, self.y = x.cuda(),y.cuda()
+        self.x, self.y = cudify(x).float(),cudify(y).float()
         self.window_size = window_size
         self.step_size = step_size
         self.transforms = transforms
@@ -117,6 +130,16 @@ def make_uci_dset_train_val(args,subj_ids):
     dset_train = StepDataset(x_train,y_train,window_size=args.window_size,step_size=args.step_size)
     return dset_train, selected_acts
 
+def make_uci_feat_dset_train_val():
+    dset_info_object = project_config.UCI_INFO
+    x = np.load(f'datasets/UCI_feat/uci_feat_data.npy')
+    y = np.load(f'datasets/UCI_feat/uci_feat_targets.npy')
+    selected_acts = dict(enumerate(['walking','upstairs','downstairs','sitting','standing','lying']))
+    dset = UCIFeatDataset(x,y)
+    #dset.x = dset.data
+    #dset.y = dset.targets
+    return dset, selected_acts
+
 def make_wisdm_v1_dset_train_val(args,subj_ids):
     dset_info_object = project_config.WISDMv1_INFO
     x = np.load('datasets/wisdm_v1/X.npy')
@@ -186,6 +209,8 @@ def make_single_dset(args,subj_ids):
         return make_pamap_dset_train_val(args,subj_ids)
     if args.dset == 'UCI':
         return make_uci_dset_train_val(args,subj_ids)
+    if args.dset == 'UCI_feat':
+        return make_uci_feat_dset_train_val()
     if args.dset == 'WISDM-v1':
         return make_wisdm_v1_dset_train_val(args,subj_ids)
     if args.dset == 'WISDM-watch':

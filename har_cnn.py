@@ -55,6 +55,28 @@ class EncByLayer(nn.Module):
             if self.show_shapes: print(x.shape)
         return x
 
+class DecByLayer(nn.Module):
+    def __init__(self,x_filters,y_filters,x_strides,y_strides,show_shapes):
+        super(DecByLayer,self).__init__()
+        self.show_shapes = show_shapes
+        num_layers = len(x_filters)
+        assert all(len(x)==num_layers for x in (y_filters,x_strides,y_strides))
+        ncvs = [4*2**i for i in reversed(range(num_layers))]+[1]
+        conv_trans_layers = [nn.Sequential(
+                nn.ConvTranspose2d(ncvs[i],ncvs[i+1],(x_filters[i],y_filters[i]),(x_strides[i],y_strides[i])),
+                nn.BatchNorm2d(ncvs[i+1]),
+                nn.LeakyReLU(0.3),
+                )
+            for i in range(num_layers)]
+        self.conv_trans_layers = nn.ModuleList(conv_trans_layers)
+
+    def forward(self,x):
+        if self.show_shapes: print(x.shape)
+        for conv_trans_layer in self.conv_trans_layers:
+            x = conv_trans_layer(x)
+            if self.show_shapes: print(x.shape)
+        return x
+
 class Var_BS_MLP(nn.Module):
     def __init__(self,input_size,hidden_size,output_size):
         super(Var_BS_MLP,self).__init__()
@@ -72,9 +94,10 @@ class Var_BS_MLP(nn.Module):
         return x
 
 class HARLearner():
-    def __init__(self,enc,mlp,num_classes,args,metric_dict):
+    def __init__(self,enc,mlp,dec,num_classes,args,metric_dict):
         self.num_classes = num_classes
         self.enc = enc
+        self.dec = dec
         self.mlp = mlp
         self.pseudo_label_lf = avoid_minus_ones_lf_wrapper(nn.CrossEntropyLoss(reduction='none'))
         self.rec_lf = nn.MSELoss(reduction='none')
@@ -96,6 +119,9 @@ class HARLearner():
 
         self.enc_opt = torch.optim.Adam(self.enc.parameters(),lr=ARGS.enc_lr)
         self.mlp_opt = torch.optim.Adam(self.mlp.parameters(),lr=ARGS.mlp_lr)
+        if dec != 'none':
+            self.dec_opt = torch.optim.Adam(self.dec.parameters(),lr=ARGS.enc_lr)
+        else: self.dec_opt = 'none'
 
     def reload_partial_experiment(self,exp_name,subj_ids,gts):
         for subj_id,gt in zip(subj_ids,gts):
@@ -103,7 +129,9 @@ class HARLearner():
             preds = np.load('experiments/{exp_name}/preds/{sid}')
             self.log_preds_and_scores(subj_id,preds,best_preds,gt)
 
-    def log_preds_and_scores(self,subj_id,preds,best_preds,gt):
+    def log_preds_and_scores(self,subj_id,preds,gt,best_preds='none'):
+        if best_preds == 'none':
+            best_preds = preds
         self.preds['last'][subj_id] = preds
         self.preds['best'][subj_id] = best_preds
         self.gts[subj_id] = gt
@@ -213,9 +241,42 @@ class HARLearner():
                 torch.nn.init.ones_(m.weight.data)
                 torch.nn.init.zeros_(m.bias.data)
 
+    def rec_train(self,dset):
+        self.enc.train()
+        self.dec.train()
+        sampler = data.RandomSampler(dset)
+        dl = data.DataLoader(dset,batch_sampler=data.BatchSampler(sampler,self.batch_size_train,drop_last=False),pin_memory=False)
+        for epoch in range(self.num_pseudo_label_epochs):
+            for batch_idx, (xb,yb,idx) in enumerate(dl):
+                latent = self.enc(xb)
+                befores_enc = [numpyify(p) for p in self.enc.parameters()]
+                befores_dec = [numpyify(p) for p in self.dec.parameters()]
+                loss = self.rec_lf(self.dec(latent),xb).mean()
+                loss.backward()
+                self.enc_opt.step(); self.enc_opt.zero_grad()
+                self.dec_opt.step(); self.dec_opt.zero_grad()
+                afters_enc = [numpyify(p) for p in self.enc.parameters()]
+                afters_dec = [numpyify(p) for p in self.dec.parameters()]
+                #print(any([(a==b).all() for a,b in zip(afters_enc,befores_enc)]))
+                #print(any([(a==b).all() for a,b in zip(afters_dec,befores_dec)]))
+            if ARGS.test:
+                break
+
+    def n2d_abl(self,subj_id,dset):
+        y_np = numpyify(dset.y)
+        self.rec_train(dset)
+        latents = self.get_latents(dset)
+        umapped_latents = umap.UMAP(min_dist=0,n_neighbors=ARGS.umap_neighbours,
+                                    n_components=ARGS.umap_dim,
+                                    random_state=42).fit_transform(latents.squeeze())
+        c = GaussianMixture(n_components=self.num_classes,n_init=5)
+        c.fit(umapped_latents)
+        preds = c.predict(umapped_latents)
+        self.log_preds_and_scores(subj_id=subj_id,preds=preds,gt=y_np)
+
     def pseudo_label_cluster_meta_loop(self,dset,meta_pivot_pred_labels):
         old_pred_labels = -np.ones(dset.y.shape)
-        np_gt_labels = dset.y.detach().cpu().numpy().astype(int)
+        np_gt_labels = numpyify(dset.y).astype(int)
         super_mask = np.ones(len(dset)).astype(np.bool)
         for epoch_num in range(self.num_meta_epochs):
             if ARGS.test:
@@ -229,7 +290,7 @@ class HARLearner():
             else:
                 latents = self.get_latents(dset)
                 start_time = time.time()
-                umapped_latents = latents if ARGS.no_umap else umap.UMAP(min_dist=0,n_neighbors=60,n_components=2,random_state=42).fit_transform(latents.squeeze())
+                umapped_latents = latents if ARGS.no_umap else umap.UMAP(min_dist=0,n_neighbors=ARGS.umap_neighbours,n_components=ARGS.umap_dim,random_state=42).fit_transform(latents.squeeze())
                 self.total_umap_time += time.time() - start_time
 
                 start_time = time.time()
@@ -332,25 +393,42 @@ class HARLearner():
 def main(args):
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
     dset_info_object = get_dataset_info_object(args.dset)
-    if args.window_size == 512:
-        x_filters = (50,40,7,4)
-        x_strides = (2,2,1,1)
-        max_pools = ((2,1),(2,1),(2,1),(2,1))
-    elif args.window_size == 100:
-        x_filters = (20,20,5,3)
-        x_strides = (1,1,1,1)
-        max_pools = ((2,1),(2,1),(2,1),1)
-    y_filters = (1,1,1,dset_info_object.num_channels)
-    y_strides = (1,1,1,1)
     num_classes = args.num_classes if args.num_classes != -1 else dset_info_object.num_classes
-    enc = EncByLayer(x_filters,y_filters,x_strides,y_strides,max_pools,show_shapes=args.show_shapes).cuda()
-    mlp = Var_BS_MLP(32,256,num_classes).cuda()
+    if args.dset == 'UCI_feat':
+        enc = nn.Sequential(nn.Linear(561,500),nn.ReLU(),
+                            nn.Linear(500,500),nn.ReLU(),
+                            nn.Linear(500,2000),nn.ReLU(),
+                            nn.Linear(2000,6),nn.ReLU()).cuda()
+        dec = nn.Sequential(nn.Linear(6,2000),nn.ReLU(),
+                            nn.Linear(2000,500),nn.ReLU(),
+                            nn.Linear(500,500),nn.ReLU(),
+                            nn.Linear(500,561),nn.ReLU()).cuda()
+        mlp = Var_BS_MLP(6,256,num_classes).cuda()
+    else:
+        if args.window_size == 512:
+            x_filters = (50,40,7,4)
+            x_strides = (2,2,1,1)
+            max_pools = ((2,1),(2,1),(2,1),(2,1))
+        elif args.window_size == 100:
+            x_filters = (20,20,5,3)
+            x_strides = (1,1,1,1)
+            max_pools = ((2,1),(2,1),(2,1),1)
+        y_filters = (1,1,1,dset_info_object.num_channels)
+        y_strides = (1,1,1,1)
+        enc = EncByLayer(x_filters,y_filters,x_strides,y_strides,max_pools,show_shapes=args.show_shapes).cuda()
+        #if args.is_n2d:
+        x_filters_trans = (15,10,15,11)
+        x_strides_trans = (2,3,3,3)
+        y_filters_trans = (dset_info_object.num_channels,1,1,1)
+        dec = DecByLayer(x_filters_trans,y_filters_trans,x_strides_trans,y_strides,show_shapes=args.show_shapes).cuda()
+
+        mlp = Var_BS_MLP(32,256,num_classes).cuda()
     if args.load_pretrained:
         enc.load_state_dict(torch.load('enc_pretrained.pt'))
     subj_ids = args.subj_ids
 
     metric_dict = {'acc':accuracy,'nmi':rnmi,'ari':rari,'f1':mean_f1}
-    har = HARLearner(enc=enc,mlp=mlp,num_classes=num_classes,args=args,metric_dict=metric_dict)
+    har = HARLearner(enc=enc,mlp=mlp,dec=dec,num_classes=num_classes,args=args,metric_dict=metric_dict)
 
     start_time = time.time()
     already_exists = check_dir(f"experiments/{args.exp_name}/preds")
@@ -360,9 +438,14 @@ def main(args):
         num_ftrs = dset_train.x.shape[-1]
         print(num_ftrs)
         lat = enc(torch.ones((2,1,args.window_size,num_ftrs),device='cuda'))
+        dec(lat)
         sys.exit()
+    dsets_by_id = make_dsets_by_user(args,subj_ids)
+    if args.is_n2d:
+        for subj_id, (dset,sa) in dsets_by_id.items():
+            print("n2ding", subj_id)
+            har.n2d_abl(subj_id,dset)
     elif not args.subject_independent:
-        dsets_by_id = make_dsets_by_user(args,subj_ids)
         bad_ids = []
         for user_id, (dset,sa) in dsets_by_id.items():
             n = get_num_labels(dset.y)
