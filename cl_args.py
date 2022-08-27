@@ -22,12 +22,13 @@ def get_cl_args():
     parser.add_argument('--clusterer',type=str,choices=['HMM','GMM'],default='HMM')
     parser.add_argument('--compute_cross_metrics',action='store_true')
     parser.add_argument('--dec_lr',type=float,default=1e-3)
-    parser.add_argument('--dset',type=str,default='UCI',choices=dset_options)
+    parser.add_argument('-d','--dset',type=str,default='UCI',choices=dset_options)
     parser.add_argument('--enc_lr',type=float,default=1e-3)
     parser.add_argument('--exp_name',type=str,default="try")
     parser.add_argument('--frac_gt_labels',type=float,default=0.1)
     parser.add_argument('--gpu',type=str,default='0')
     parser.add_argument('--is_n2d',action='store_true')
+    parser.add_argument('--is_uln',action='store_true',help='net for dim red. instead of umap')
     parser.add_argument('--just_align_time',action='store_true')
     parser.add_argument('--load_pretrained',action='store_true')
     parser.add_argument('--mlp_lr',type=float,default=1e-3)
@@ -54,6 +55,8 @@ def get_cl_args():
     ARGS = parser.parse_args()
 
     need_umap = False
+    if ARGS.is_uln:
+        ARGS.no_umap = True
     if ARGS.short_epochs:
         ARGS.num_meta_meta_epochs = 1
         ARGS.num_meta_epochs = 1
@@ -66,7 +69,6 @@ def get_cl_args():
         ARGS.num_meta_epochs = 1
         ARGS.num_meta_meta_epochs = 1
         ARGS.num_pseudo_label_epochs = 1
-        ARGS.subj_ids = ['0']
     elif not ARGS.no_umap and not ARGS.show_shapes: need_umap = True
     print(ARGS)
     dset_info_object = project_config.get_dataset_info_object(ARGS.dset)

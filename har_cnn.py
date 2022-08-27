@@ -422,7 +422,12 @@ def main(args):
         y_filters_trans = (dset_info_object.num_channels,1,1,1)
         dec = DecByLayer(x_filters_trans,y_filters_trans,x_strides_trans,y_strides,show_shapes=args.show_shapes).cuda()
 
-        mlp = Var_BS_MLP(32,256,num_classes).cuda()
+        optional_umap_like_net_in = Var_BS_MLP(32,256,2).cuda()
+        optional_umap_like_net_out = Var_BS_MLP(2,256,2).cuda()
+        if ARGS.is_uln:
+            enc = nn.Sequential(enc,nn.Flatten(1),Var_BS_MLP(32,256,2).cuda())
+            dec = nn.Sequential(Var_BS_MLP(32,256,2).cuda(),nn.Unflatten(2,(32,1,1)),dec)
+        mlp = Var_BS_MLP(2 if ARGS.is_uln else 32,256,num_classes).cuda()
     if args.load_pretrained:
         enc.load_state_dict(torch.load('enc_pretrained.pt'))
     subj_ids = args.subj_ids
